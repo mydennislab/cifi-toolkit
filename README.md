@@ -8,7 +8,8 @@ Toolkit for quality control and downstream processing of **CiFi long reads**.
 
 CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. A single CiFi read can contain multiple proximity-ligated genomic segments. `cifi-toolkit` identifies those segments and converts each multi-contact read into Hi-C-like paired contacts for downstream applications such as genome assembly, phasing, contact-map generation, and scaffolding.
 
-https://voles.dennislab.org
+- https://cifi.dennislab.org
+- https://voles.dennislab.org
 
 ---
 
