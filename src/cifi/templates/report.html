@@ -185,9 +185,9 @@ Plotly.newPlot("{{ plot_id }}", [{
 {{ render_plot('sites-plot', sites_histogram, 'Number of Sites', 'Count', '#27ae60') }}
 {% endif %}
 
-{% if fragment_size_histogram %}
-<h2>Fragment Size Distribution</h2>
-{{ render_plot('frag-size-plot', fragment_size_histogram, 'Fragment Size (bp)', 'Count', '#9b59b6') }}
+{% if segment_size_histogram %}
+<h2>Segment Size Distribution</h2>
+{{ render_plot('segment-size-plot', segment_size_histogram, 'Segment Size (bp)', 'Count', '#9b59b6') }}
 {% endif %}
 
 <h2>Recommended Command</h2>
@@ -207,14 +207,39 @@ Plotly.newPlot("{{ plot_id }}", [{
 {{ render_table(['Filter Reason', 'Reads Filtered', '% of Input'], filter_table, filter_caption) }}
 {% endif %}
 
-{% if frag_stats_table %}
-<h2>Fragment Statistics</h2>
-{{ render_table(['Metric', 'Value'], frag_stats_table) }}
+{% if segment_stats_table %}
+<h2>Segment Statistics</h2>
+{{ render_table(['Metric', 'Value'], segment_stats_table) }}
 {% endif %}
 
-{% if fragment_length_histogram %}
-<h2>Fragment Length Distribution</h2>
-{{ render_plot('frag-length-plot', fragment_length_histogram, 'Length (bp)', 'Count', '#27ae60') }}
+{% if input_table %}
+<h2>Input Reads</h2>
+{{ render_table(['Metric', 'Value'], input_table) }}
+{% endif %}
+
+{% if read_length_histogram %}
+<h2>Read Length Distribution</h2>
+{{ render_plot('read-length-plot', read_length_histogram, 'Read Length (bp)', 'Count', '#2c7fb8') }}
+{% endif %}
+
+{% if yield_table %}
+<h2>Yield</h2>
+{{ render_table(['Metric', 'Value'], yield_table) }}
+{% endif %}
+
+{% if segments_per_read_histogram %}
+<h2>Segments per Read</h2>
+{{ render_plot('segments-per-read-plot', segments_per_read_histogram, 'Segments', 'Reads', '#e6842a') }}
+{% endif %}
+
+{% if pairs_per_read_histogram %}
+<h2>Pairs per Read</h2>
+{{ render_plot('pairs-per-read-plot', pairs_per_read_histogram, 'Pairs', 'Reads', '#d7301f') }}
+{% endif %}
+
+{% if segment_length_histogram %}
+<h2>Segment Length Distribution</h2>
+{{ render_plot('segment-length-plot', segment_length_histogram, 'Length (bp)', 'Count', '#27ae60') }}
 {% endif %}
 
 {% if sites_per_read_histogram %}

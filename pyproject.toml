@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cifi"
-version = "0.2.3"
+version = "1.0.0"
 description = "CiFi - toolkit for downstream processing of CiFi long reads."
 readme = "README.md"
 license = {text = "MIT"}
@@ -73,11 +73,11 @@ all = [
 cifi = "cifi.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mr-eyes/cifi-toolkit"
-Documentation = "https://github.com/mr-eyes/cifi-toolkit#readme"
-Repository = "https://github.com/mr-eyes/cifi-toolkit"
-Issues = "https://github.com/mr-eyes/cifi-toolkit/issues"
-Changelog = "https://github.com/mr-eyes/cifi-toolkit/releases"
+Homepage = "https://github.com/mydennislab/cifi-toolkit"
+Documentation = "https://github.com/mydennislab/cifi-toolkit#readme"
+Repository = "https://github.com/mydennislab/cifi-toolkit"
+Issues = "https://github.com/mydennislab/cifi-toolkit/issues"
+Changelog = "https://github.com/mydennislab/cifi-toolkit/releases"
 
 [tool.scikit-build]
 wheel.packages = ["src/cifi"]

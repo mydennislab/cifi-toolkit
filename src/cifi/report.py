@@ -95,7 +95,7 @@ def generate_qc_report(results: Dict[str, Any], output_path: str) -> str:
         # Histograms
         "read_length_histogram": _histogram_to_plot_data(results.get("read_length_histogram")),
         "sites_histogram": _histogram_to_plot_data(results.get("sites_histogram")),
-        "fragment_size_histogram": _histogram_to_plot_data(results.get("fragment_size_histogram")),
+        "segment_size_histogram": _histogram_to_plot_data(results.get("segment_size_histogram")),
     }
 
     html = template.render(**template_data)
@@ -105,6 +105,13 @@ def generate_qc_report(results: Dict[str, Any], output_path: str) -> str:
         f.write(html)
 
     return str(output_path)
+
+
+def _param(params, new_key, old_key, default="n/a"):
+    """Read a parameter, tolerating stats files written before the rename."""
+    if new_key in params:
+        return params[new_key]
+    return params.get(old_key, default)
 
 
 def generate_digest_report(stats_data: Dict[str, Any], output_path: str) -> str:
@@ -121,34 +128,81 @@ def generate_digest_report(stats_data: Dict[str, Any], output_path: str) -> str:
     # Build filter table if applicable
     reads_in = results["reads_in"]
     filtered_few_sites = results.get("filtered_few_sites", 0)
-    filtered_short_frags = results.get("filtered_short_frags", 0)
+    filtered_short_segments = results.get(
+        "filtered_short_segments", results.get("filtered_short_frags", 0))
 
     filter_table = []
-    if reads_in > 0 and (filtered_few_sites > 0 or filtered_short_frags > 0):
+    if reads_in > 0 and (filtered_few_sites > 0 or filtered_short_segments > 0):
         if filtered_few_sites > 0:
             pct = 100 * filtered_few_sites / reads_in
             filter_table.append([
-                f'Too few sites (< {params["min_fragments"]} fragments)',
+                f'Too few sites (< {_param(params, "min_segments", "min_fragments")} segments)',
                 _format_number(filtered_few_sites),
                 f'{pct:.1f}%'
             ])
-        if filtered_short_frags > 0:
-            pct = 100 * filtered_short_frags / reads_in
+        if filtered_short_segments > 0:
+            pct = 100 * filtered_short_segments / reads_in
             filter_table.append([
-                f'Fragments too short (< {params["min_frag_len"]} bp)',
-                _format_number(filtered_short_frags),
+                f'Segments too short (< {_param(params, "min_segment_len", "min_frag_len")} bp)',
+                _format_number(filtered_short_segments),
                 f'{pct:.1f}%'
             ])
 
-    # Build fragment stats table if available
-    frag_stats = stats_data.get("fragment_lengths")
-    frag_stats_table = None
-    if frag_stats:
-        frag_stats_table = [
-            ["Total Fragments", _format_number(results["total_fragments"])],
-            ["Mean Length", f'{frag_stats["mean"]:.0f} bp'],
-            ["Median Length", f'{frag_stats["median"]:.0f} bp'],
-            ["Range", f'{frag_stats["min"]:,} - {frag_stats["max"]:,} bp'],
+    # Build segment stats table if available
+    segment_stats = stats_data.get("segment_lengths") or stats_data.get("fragment_lengths")
+    segment_stats_table = None
+    if segment_stats:
+        segment_stats_table = [
+            ["Total Segments", _format_number(
+                results.get("total_segments", results.get("total_fragments", 0)))],
+            ["Mean Length", f'{segment_stats["mean"]:.0f} bp'],
+            ["Median Length", f'{segment_stats["median"]:.0f} bp'],
+            ["Range", f'{segment_stats["min"]:,} - {segment_stats["max"]:,} bp'],
+        ]
+
+    # Input profile: describes what was fed in, including skipped reads
+    inp = stats_data.get("input_reads") or {}
+    input_table = None
+    if inp.get("total_bases"):
+        length = inp.get("length") or {}
+        input_table = [
+            ["Reads", _format_number(inp["count"])],
+            ["Total Bases", _format_number(inp["total_bases"])],
+            ["GC Content", f'{inp["gc_content"]:.1f}%'],
+            ["Enzyme Sites", _format_number(inp["total_sites"])],
+            ["Mean Sites / Read (all)",
+             f'{_param(inp, "mean_sites_per_read_all", "mean_sites_per_read", 0):.1f}'],
+        ]
+        if length:
+            input_table += [
+                ["Read Length (mean)", f'{length["mean"]:,.0f} bp'],
+                ["Read Length (median)", f'{length["median"]:,.0f} bp'],
+                ["Read Length (range)", f'{length["min"]:,} - {length["max"]:,} bp'],
+            ]
+
+    # Yield: unique segment bases vs bases written, which differ because each
+    # segment is emitted once per pair it takes part in
+    y = stats_data.get("yield") or {}
+    yield_table = None
+    if y.get("bases_in"):
+        yield_table = [
+            ["Bases In", _format_number(y["bases_in"])],
+            ["Bases In Segments", f'{_format_number(y["bases_in_segments"])} '
+                                  f'({100 * y["fraction_retained"]:.1f}% retained)'],
+            ["Bases Written (R1)", _format_number(y["bases_out_r1"])],
+            ["Bases Written (R2)", _format_number(y["bases_out_r2"])],
+            ["Expansion Factor", f'{y["expansion_factor"]:.1f}x'],
+        ]
+        if "bases_in_filtered_reads" in y:
+            yield_table.insert(2, ["In Filtered Reads",
+                                   _format_number(y["bases_in_filtered_reads"])])
+    f = stats_data.get("filtering") or {}
+    if f:
+        yield_table = (yield_table or []) + [
+            ["Bases Trimmed (overhang)", _format_number(f["bases_trimmed_overhang"])],
+            ["Bases Dropped (short segments)",
+             f'{_format_number(f["bases_dropped_short_segments"])} '
+             f'in {_format_number(f["segments_dropped_short"])} segments'],
         ]
 
     # Build template data
@@ -162,8 +216,8 @@ def generate_digest_report(stats_data: Dict[str, Any], output_path: str) -> str:
         "param_table": [
             ["Enzyme", params["enzyme"]],
             ["Recognition Site", params.get("enzyme_site", "N/A")],
-            ["Min Fragments", str(params["min_fragments"])],
-            ["Min Fragment Length", f'{params["min_frag_len"]} bp'],
+            ["Min Segments", str(_param(params, "min_segments", "min_fragments"))],
+            ["Min Segment Length", f'{_param(params, "min_segment_len", "min_frag_len")} bp'],
         ],
 
         # Summary metrics
@@ -178,12 +232,22 @@ def generate_digest_report(stats_data: Dict[str, Any], output_path: str) -> str:
         "filter_table": filter_table if filter_table else None,
         "filter_caption": f'Total filtered: {_format_number(results["reads_skipped"])} reads' if filter_table else "",
 
-        # Fragment stats table (may be None)
-        "frag_stats_table": frag_stats_table,
+        # Segment stats table (may be None)
+        "segment_stats_table": segment_stats_table,
+
+        # Input profile and yield (may be None on older stats files)
+        "input_table": input_table,
+        "yield_table": yield_table,
 
         # Histograms
-        "fragment_length_histogram": _histogram_to_plot_data(stats_data.get("fragment_length_histogram")),
+        "segment_length_histogram": _histogram_to_plot_data(stats_data.get("segment_length_histogram")
+                                                or stats_data.get("fragment_length_histogram")),
         "sites_per_read_histogram": _histogram_to_plot_data(stats_data.get("sites_per_read_histogram")),
+        "read_length_histogram": _histogram_to_plot_data((inp.get("length") or {}).get("histogram")),
+        "segments_per_read_histogram": _histogram_to_plot_data(
+            (stats_data.get("segments_per_read") or {}).get("histogram")),
+        "pairs_per_read_histogram": _histogram_to_plot_data(
+            (stats_data.get("pairs_per_read") or {}).get("histogram")),
 
         # Output files
         "output_files": [stats_data["output"]["r1"], stats_data["output"]["r2"]],
@@ -255,7 +319,7 @@ def generate_filter_report(stats_data: Dict[str, Any], output_path: str) -> str:
         "filter_caption": f'Total filtered: {_format_number(total_failed)} pairs' if filter_table else "",
 
         # No histograms for filter
-        "fragment_length_histogram": None,
+        "segment_length_histogram": None,
         "sites_per_read_histogram": None,
 
         # Output files
@@ -293,9 +357,9 @@ def write_qc_tsvs(results: Dict[str, Any], output_dir: str) -> List[str]:
             "reads_analyzed", "total_bases", "avg_read_length", "median_read_length",
             "min_read_length", "max_read_length", "gc_content",
             "total_sites", "sites_per_read_mean", "sites_per_read_median",
-            "reads_passing", "pass_rate", "est_total_fragments", "est_total_pairs",
-            "avg_fragments_per_read", "avg_pairs_per_read",
-            "frag_size_mean", "frag_size_median", "frag_size_min", "frag_size_max",
+            "reads_passing", "pass_rate", "est_total_segments", "est_total_pairs",
+            "avg_segments_per_read", "avg_pairs_per_read",
+            "segment_size_mean", "segment_size_median", "segment_size_min", "segment_size_max",
         ]:
             val = results.get(key)
             if val is not None:
@@ -321,7 +385,7 @@ def write_qc_tsvs(results: Dict[str, Any], output_dir: str) -> List[str]:
     hist_specs = [
         ("read_length_histogram", "read_length_histogram.tsv"),
         ("sites_histogram", "sites_per_read_histogram.tsv"),
-        ("fragment_size_histogram", "fragment_size_histogram.tsv"),
+        ("segment_size_histogram", "segment_size_histogram.tsv"),
     ]
     for hist_key, filename in hist_specs:
         hist = results.get(hist_key)
@@ -363,8 +427,8 @@ def generate_qc_plots(results: Dict[str, Any], output_dir: str) -> List[str]:
          "Read Length Distribution", "Read Length (bp)", "Count", "#3498db"),
         ("sites_histogram", "sites_per_read_distribution.png",
          "Sites per Read Distribution", "Sites per Read", "Count", "#27ae60"),
-        ("fragment_size_histogram", "fragment_size_distribution.png",
-         "Fragment Size Distribution", "Fragment Size (bp)", "Count", "#9b59b6"),
+        ("segment_size_histogram", "segment_size_distribution.png",
+         "Segment Size Distribution", "Segment Size (bp)", "Count", "#9b59b6"),
     ]
 
     for hist_key, filename, title, xlabel, ylabel, color in plot_specs:
@@ -486,8 +550,8 @@ def generate_qc_pdf(results: Dict[str, Any], output_path: str) -> Optional[str]:
              "Read Length Distribution", "Read Length (bp)", "Count", "#3498db"),
             ("sites_histogram",
              "Sites per Read Distribution", "Sites per Read", "Count", "#27ae60"),
-            ("fragment_size_histogram",
-             "Fragment Size Distribution", "Fragment Size (bp)", "Count", "#9b59b6"),
+            ("segment_size_histogram",
+             "Segment Size Distribution", "Segment Size (bp)", "Count", "#9b59b6"),
         ]
 
         for hist_key, title, xlabel, ylabel, color in plot_specs:

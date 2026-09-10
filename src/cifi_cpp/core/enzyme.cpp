@@ -18,7 +18,9 @@ static const std::unordered_map<std::string, std::pair<std::string, int>> ENZYME
 int EnzymeInfo::overhang_length() const {
     int site_len = static_cast<int>(site.length());
     if (cut_offset == 0) return site_len;
-    if (cut_offset == site_len) return 0;
+    // A cut_offset past the site would give a negative remnant, which becomes a
+    // huge value once widened to size_t at the call site.
+    if (cut_offset >= site_len) return 0;
     return site_len - cut_offset;
 }
 

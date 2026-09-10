@@ -2,6 +2,10 @@ cff-version: 1.2.0
 message: "If you use this software, please cite the following article."
 title: "cifi-toolkit"
 type: software
+version: "1.0.0"
+license: MIT
+repository-code: "https://github.com/mydennislab/cifi-toolkit"
+url: "https://voles.dennislab.org"
 authors:
   - family-names: Abuelanin
     given-names: Mohamed
@@ -71,7 +75,8 @@ preferred-citation:
       given-names: Jessica
     - family-names: Dennis
       given-names: Megan Y
-  journal: bioRxiv
+  journal: "Cell Genomics"
   year: 2026
-  doi: 10.64898/2026.03.13.711624
-  url: https://www.biorxiv.org/content/early/2026/03/17/2026.03.13.711624
+  start: 101336
+  doi: 10.1016/j.xgen.2026.101336
+  url: https://doi.org/10.1016/j.xgen.2026.101336

@@ -34,6 +34,8 @@ public:
 
 private:
     std::ofstream out_;
+    std::string path_;
+    std::string buf_;  // reused record buffer
 };
 
 /**
@@ -51,6 +53,7 @@ public:
 
 private:
     gzFile gz_;
+    std::string buf_;  // reused record buffer, avoids a malloc per read
 };
 
 /**

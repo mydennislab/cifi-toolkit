@@ -4,6 +4,7 @@
 #pragma once
 
 #include <vector>
+#include <utility>
 #include <cstdint>
 #include <climits>
 #include <parallel_hashmap/phmap.h>
@@ -36,6 +37,16 @@ public:
 
     // Histogram access (for reports)
     std::vector<std::pair<int, uint64_t>> get_histogram() const;
+
+    /**
+     * Equal-width histogram over [min, max] as (bin edges, counts).
+     *
+     * Built here rather than from values() so a report does not have to copy
+     * every recorded value across the language boundary. Integer-valued data
+     * should pass num_bins <= max-min+1 to avoid structurally empty bins.
+     */
+    std::pair<std::vector<double>, std::vector<uint64_t>> binned(
+        int num_bins, bool integer_bins = false) const;
 
     // Raw values (exact mode only, empty in fast mode)
     const std::vector<int>& values() const { return values_; }

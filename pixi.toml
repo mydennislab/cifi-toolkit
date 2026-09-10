@@ -1,6 +1,6 @@
 [project]
 name = "cifi"
-version = "0.2.3"
+version = "1.0.0"
 description = "CiFi - toolkit for downstream processing of CiFi long reads."
 authors = ["Mohamed Abuelanin <mabuelanin@gmail.com>"]
 channels = ["conda-forge", "bioconda"]

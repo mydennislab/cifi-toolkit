@@ -1,5 +1,5 @@
 {% set name = "cifi" %}
-{% set version = "0.2.3" %}
+{% set version = "1.0.0" %}
 
 package:
   name: {{ name|lower }}
@@ -47,7 +47,7 @@ test:
     - cifi enzymes
 
 about:
-  home: "https://github.com/mr-eyes/cifi-toolkit"
+  home: "https://github.com/mydennislab/cifi-toolkit"
   summary: "CiFi - toolkit for downstream processing of CiFi long reads"
   license: "MIT"
   license_family: "MIT"

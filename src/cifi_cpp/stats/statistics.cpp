@@ -71,13 +71,15 @@ double Statistics::percentile_from_histogram(double p) const {
     for (const auto& [bin, cnt] : bins) {
         cumulative += cnt;
         if (cumulative >= target) {
-            // Interpolate within bin
             double bin_start = bin * bin_size_;
-            double bin_end = bin_start + bin_size_;
-            return (bin_start + bin_end) / 2.0;
+            // With unit bins the bin IS the value; interpolating would report a
+            // median of value + 0.5, which can land above max().
+            if (bin_size_ == 1) return bin_start;
+            return bin_start + bin_size_ / 2.0;
         }
     }
 
+    if (bin_size_ == 1) return bins.back().first;
     return bins.back().first * bin_size_ + bin_size_ / 2.0;
 }
 
@@ -97,6 +99,49 @@ std::vector<std::pair<int, uint64_t>> Statistics::get_histogram() const {
     std::vector<std::pair<int, uint64_t>> result(hist.begin(), hist.end());
     std::sort(result.begin(), result.end());
     return result;
+}
+
+
+std::pair<std::vector<double>, std::vector<uint64_t>> Statistics::binned(
+    int num_bins, bool integer_bins) const {
+    std::vector<double> edges;
+    std::vector<uint64_t> counts;
+    if (count_ == 0 || num_bins < 1) return {edges, counts};
+
+    if (min_ == max_) {
+        edges.push_back(min_);
+        counts.push_back(count_);
+        return {edges, counts};
+    }
+
+    // Integer data is binned on half-integer edges so each bar is centred on
+    // the value it counts, instead of drifting up to a unit away from it.
+    const double lo = integer_bins ? min_ - 0.5 : min_;
+    const double hi = integer_bins ? max_ + 0.5 : max_;
+    const double width = (hi - lo) / num_bins;
+    edges.reserve(num_bins + 1);
+    for (int i = 0; i <= num_bins; ++i) edges.push_back(lo + i * width);
+    counts.assign(num_bins, 0);
+
+    auto place = [&](double value, uint64_t weight) {
+        int idx = static_cast<int>((value - lo) / width);
+        if (idx < 0) idx = 0;
+        if (idx >= num_bins) idx = num_bins - 1;
+        counts[idx] += weight;
+    };
+
+    if (fast_mode_) {
+        // Bin midpoints stand in for the values they represent.
+        for (const auto& [bin, cnt] : histogram_) {
+            double centre = bin_size_ == 1 ? static_cast<double>(bin)
+                                           : bin * bin_size_ + bin_size_ / 2.0;
+            place(centre, cnt);
+        }
+    } else {
+        for (int v : values_) place(v, 1);
+    }
+
+    return {edges, counts};
 }
 
 } // namespace cifi
