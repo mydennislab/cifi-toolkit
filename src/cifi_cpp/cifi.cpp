@@ -14,12 +14,16 @@
 #include <algorithm>
 #include <cstring>
 #include <exception>
+#include <initializer_list>
+#include <memory>
 
 #include "core/enzyme.hpp"
 #include "core/digestion.hpp"
+#include "core/segment_name.hpp"
 #include "stats/statistics.hpp"
 #include "io/writer.hpp"
 #include "filter/bam_filter.hpp"
+#include "contacts/contacts.hpp"
 
 extern "C" {
 #include "kseq.h"
@@ -294,6 +298,7 @@ static void process_bam_reads(
     const cifi::ProcessingConfig& config,
     cifi::FastqWriter& writer_r1,
     cifi::FastqWriter& writer_r2,
+    cifi::FastqWriter* writer_segments,
     cifi::ProcessingResult& result
 ) {
     htsFile *fp = hts_open(input_path.c_str(), "r");
@@ -342,7 +347,7 @@ static void process_bam_reads(
         }
 
         cifi::process_single_read(name, sequence, quality, config,
-                                  writer_r1, writer_r2, result);
+                                  writer_r1, writer_r2, result, writer_segments);
     }
 
     bam_destroy1(b);
@@ -356,6 +361,7 @@ static void process_fastq_reads(
     const cifi::ProcessingConfig& config,
     cifi::FastqWriter& writer_r1,
     cifi::FastqWriter& writer_r2,
+    cifi::FastqWriter* writer_segments,
     cifi::ProcessingResult& result
 ) {
     gzFile fp = gzopen(input_path.c_str(), "r");
@@ -370,20 +376,52 @@ static void process_fastq_reads(
                                         : std::string(seq->seq.l, 'I'));
 
         cifi::process_single_read(name, sequence, quality, config,
-                                  writer_r1, writer_r2, result);
+                                  writer_r1, writer_r2, result, writer_segments);
     }
 
     kseq_destroy(seq);
     gzclose(fp);
 }
 
-// Close both writers even if the first fails, so a flush error on one is not
-// hidden by never closing the other.
-static void close_both(cifi::FastqWriter& a, cifi::FastqWriter& b) {
+// Close every writer even if an earlier one fails, so a flush error on one is
+// not hidden by never closing the others.
+static void close_all(std::initializer_list<cifi::FastqWriter*> writers) {
     std::exception_ptr err;
-    try { a.close(); } catch (...) { err = std::current_exception(); }
-    try { b.close(); } catch (...) { if (!err) err = std::current_exception(); }
+    for (cifi::FastqWriter* w : writers) {
+        if (!w) continue;
+        try { w->close(); } catch (...) { if (!err) err = std::current_exception(); }
+    }
     if (err) std::rethrow_exception(err);
+}
+
+// Digest one input into R1/R2 and, when segments_out is non-empty, the
+// unique-segment FASTQ (gzip decided by its extension, as for any writer).
+static cifi::ProcessingResult digest_file(
+    const std::string& input_path,
+    const std::string& output_r1,
+    const std::string& output_r2,
+    const std::string& segments_out,
+    const cifi::ProcessingConfig& config,
+    bool gzip_output
+) {
+    cifi::ProcessingResult result(config.fast_mode);
+    auto writer_r1 = cifi::make_writer(output_r1, gzip_output);
+    auto writer_r2 = cifi::make_writer(output_r2, gzip_output);
+    std::unique_ptr<cifi::FastqWriter> writer_segments;
+    if (!segments_out.empty()) {
+        writer_segments = cifi::make_writer(segments_out, false);
+    }
+
+    if (is_bam_file(input_path)) {
+        process_bam_reads(input_path, config, *writer_r1, *writer_r2,
+                          writer_segments.get(), result);
+    } else {
+        process_fastq_reads(input_path, config, *writer_r1, *writer_r2,
+                            writer_segments.get(), result);
+    }
+
+    close_all({writer_r1.get(), writer_r2.get(), writer_segments.get()});
+    return result;
 }
 
 // Process reads with a named enzyme
@@ -397,7 +435,8 @@ cifi::ProcessingResult process_reads(
     bool strip_overhang = true,
     bool gzip_output = false,
     bool fast_mode = false,
-    bool revcomp_r2 = false
+    bool revcomp_r2 = false,
+    const std::string& segments_out = ""
 ) {
     auto enzyme_opt = cifi::get_enzyme(enzyme_name);
     if (!enzyme_opt) {
@@ -412,18 +451,7 @@ cifi::ProcessingResult process_reads(
     config.revcomp_r2 = revcomp_r2;
     config.fast_mode = fast_mode;
 
-    cifi::ProcessingResult result(fast_mode);
-    auto writer_r1 = cifi::make_writer(output_r1, gzip_output);
-    auto writer_r2 = cifi::make_writer(output_r2, gzip_output);
-
-    if (is_bam_file(input_path)) {
-        process_bam_reads(input_path, config, *writer_r1, *writer_r2, result);
-    } else {
-        process_fastq_reads(input_path, config, *writer_r1, *writer_r2, result);
-    }
-
-    close_both(*writer_r1, *writer_r2);
-    return result;
+    return digest_file(input_path, output_r1, output_r2, segments_out, config, gzip_output);
 }
 
 // Process reads with a custom enzyme site
@@ -438,7 +466,8 @@ cifi::ProcessingResult process_reads_custom(
     bool strip_overhang = true,
     bool gzip_output = false,
     bool fast_mode = false,
-    bool revcomp_r2 = false
+    bool revcomp_r2 = false,
+    const std::string& segments_out = ""
 ) {
     if (site.empty()) {
         throw std::runtime_error("Custom site must not be empty");
@@ -459,18 +488,20 @@ cifi::ProcessingResult process_reads_custom(
     config.revcomp_r2 = revcomp_r2;
     config.fast_mode = fast_mode;
 
-    cifi::ProcessingResult result(fast_mode);
-    auto writer_r1 = cifi::make_writer(output_r1, gzip_output);
-    auto writer_r2 = cifi::make_writer(output_r2, gzip_output);
+    return digest_file(input_path, output_r1, output_r2, segments_out, config, gzip_output);
+}
 
-    if (is_bam_file(input_path)) {
-        process_bam_reads(input_path, config, *writer_r1, *writer_r2, result);
-    } else {
-        process_fastq_reads(input_path, config, *writer_r1, *writer_r2, result);
-    }
-
-    close_both(*writer_r1, *writer_r2);
-    return result;
+// Contacts from mapped unique segments
+cifi::ContactsResult reconstruct_contacts(
+    const std::string& input_path,
+    const std::string& output_path,
+    int mapq = 1,
+    int threads = 4
+) {
+    cifi::ContactsConfig config;
+    config.min_mapq = mapq;
+    config.threads = threads;
+    return cifi::reconstruct_contacts(input_path, output_path, config);
 }
 
 // ============================================================================
@@ -514,6 +545,8 @@ NB_MODULE(_core, m) {
         // yield and per-read distributions (passing reads)
         .def_ro("bases_out_r1", &cifi::ProcessingResult::bases_out_r1)
         .def_ro("bases_out_r2", &cifi::ProcessingResult::bases_out_r2)
+        .def_ro("segments_written", &cifi::ProcessingResult::segments_written)
+        .def_ro("bases_out_segments", &cifi::ProcessingResult::bases_out_segments)
         .def_ro("segments_dropped_short", &cifi::ProcessingResult::segments_dropped_short)
         .def_ro("bases_dropped_short", &cifi::ProcessingResult::bases_dropped_short)
         .def_ro("bases_trimmed_overhang", &cifi::ProcessingResult::bases_trimmed_overhang)
@@ -576,9 +609,11 @@ NB_MODULE(_core, m) {
           nb::arg("gzip_output") = false,
           nb::arg("fast_mode") = false,
           nb::arg("revcomp_r2") = false,
+          nb::arg("segments_out") = "",
           "Process FASTQ or BAM file, generating ALL pairwise contacts (n choose 2).\n"
           "Mates share a read name; min_segment_len bounds the emitted read length.\n"
-          "R2 keeps native orientation unless revcomp_r2 is set.");
+          "R2 keeps native orientation unless revcomp_r2 is set.\n"
+          "segments_out: optional FASTQ (.gz for gzip) receiving each retained segment once.");
 
     m.def("process_reads_custom", &process_reads_custom,
           nb::arg("input_path"),
@@ -592,9 +627,22 @@ NB_MODULE(_core, m) {
           nb::arg("gzip_output") = false,
           nb::arg("fast_mode") = false,
           nb::arg("revcomp_r2") = false,
+          nb::arg("segments_out") = "",
           "Process FASTQ or BAM file with custom enzyme site.\n"
           "Mates share a read name; min_segment_len bounds the emitted read length.\n"
-          "R2 keeps native orientation unless revcomp_r2 is set.");
+          "R2 keeps native orientation unless revcomp_r2 is set.\n"
+          "segments_out: optional FASTQ (.gz for gzip) receiving each retained segment once.");
+
+    // Segment naming contract (see core/segment_name.hpp)
+    m.def("segment_name", &cifi::segment_name,
+          nb::arg("read_name"), nb::arg("span_index"),
+          "QNAME of a uniquely emitted segment: <read>__CIFI_SEG__<span_index>.");
+
+    m.def("parse_segment_name", [](const std::string& qname) -> std::pair<std::string, uint32_t> {
+        auto parsed = cifi::parse_segment_name(qname);
+        return {parsed.read, parsed.index};
+    }, nb::arg("qname"),
+       "Split a segment QNAME into (read_name, span_index); ValueError if malformed.");
 
     // Enzyme utilities
     m.def("list_enzymes", &cifi::list_enzymes, "Get list of available enzyme names");
@@ -641,4 +689,39 @@ NB_MODULE(_core, m) {
           nb::arg("mapq_threshold"),
           nb::arg("threads") = 4,
           "Filter BAM by MAPQ quality for paired reads");
+
+    // Contacts from mapped unique segments
+    nb::class_<cifi::ContactsResult>(m, "ContactsResult")
+        .def_ro("records_seen", &cifi::ContactsResult::records_seen)
+        .def_ro("segments_seen", &cifi::ContactsResult::segments_seen)
+        .def_ro("reads_seen", &cifi::ContactsResult::reads_seen)
+        .def_ro("primary_mapped", &cifi::ContactsResult::primary_mapped)
+        .def_ro("unmapped", &cifi::ContactsResult::unmapped)
+        .def_ro("secondary_ignored", &cifi::ContactsResult::secondary_ignored)
+        .def_ro("supplementary_ignored", &cifi::ContactsResult::supplementary_ignored)
+        .def_ro("duplicate_primary", &cifi::ContactsResult::duplicate_primary)
+        .def_ro("below_mapq", &cifi::ContactsResult::below_mapq)
+        .def_ro("usable_segments", &cifi::ContactsResult::usable_segments)
+        .def_ro("reads_with_contacts", &cifi::ContactsResult::reads_with_contacts)
+        .def_ro("contacts_written", &cifi::ContactsResult::contacts_written)
+        .def_ro("pair_mates_equivalent", &cifi::ContactsResult::pair_mates_equivalent)
+        .def_ro("max_usable_in_read", &cifi::ContactsResult::max_usable_in_read)
+        .def_ro("max_contacts_in_read", &cifi::ContactsResult::max_contacts_in_read)
+        .def_ro("sort_order", &cifi::ContactsResult::sort_order)
+        .def_ro("usable_per_read_stats", &cifi::ContactsResult::usable_per_read_stats)
+        .def_ro("contacts_per_read_stats", &cifi::ContactsResult::contacts_per_read_stats);
+
+    m.def("reconstruct_contacts", &reconstruct_contacts,
+          nb::arg("input_path"),
+          nb::arg("output_path"),
+          nb::arg("mapq") = 1,
+          nb::arg("threads") = 4,
+          "Expand a name-grouped BAM of mapped unique segments into all pairwise\n"
+          "contacts per read, written as YaHS PA5 (.gz for gzip).\n"
+          "Primary mapped records at or above mapq take part; C(k,2) rows per read.");
+
+    m.def("pa5_position", &cifi::pa5_position,
+          nb::arg("pos0"), nb::arg("end0"),
+          "PA5 position for an alignment spanning [pos0, end0) in 0-based\n"
+          "coordinates: the midpoint yahs computes for a name-sorted BAM.");
 }

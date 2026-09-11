@@ -27,6 +27,9 @@ struct ProcessingConfig {
  */
 struct SegmentExtraction {
     std::vector<std::pair<size_t, size_t>> segments;
+    // 1-based index of the cut-delimited span each kept segment came from,
+    // parallel to segments. Dropped spans leave gaps; see segment_name.hpp.
+    std::vector<uint32_t> span_index;
     uint64_t dropped_short = 0;   // non-empty spans below min_emit_len after trimming
     uint64_t bases_dropped = 0;   // bases in those spans, post-trim
     uint64_t bases_trimmed = 0;   // bases removed by the 5' site-remnant trim
@@ -47,6 +50,9 @@ struct ProcessingResult {
     // Yield, over reads that passed
     uint64_t bases_out_r1 = 0;
     uint64_t bases_out_r2 = 0;
+    // Unique-segment output; both stay 0 when no segments writer is given
+    uint64_t segments_written = 0;
+    uint64_t bases_out_segments = 0;
     uint64_t segments_dropped_short = 0;
     uint64_t bases_dropped_short = 0;
     uint64_t bases_trimmed_overhang = 0;
@@ -76,6 +82,10 @@ struct ProcessingResult {
 /**
  * Process a single read: digest and write all pairwise contacts.
  * Returns true if read passed filters and was processed.
+ *
+ * When out_segments is given, each retained segment of a passing read is
+ * also written once, in read order and native orientation, named per
+ * segment_name.hpp. The R1/R2 output is the same either way.
  */
 bool process_single_read(
     const std::string& name,
@@ -84,7 +94,8 @@ bool process_single_read(
     const ProcessingConfig& config,
     FastqWriter& out_r1,
     FastqWriter& out_r2,
-    ProcessingResult& result
+    ProcessingResult& result,
+    FastqWriter* out_segments = nullptr
 );
 
 /**

@@ -335,6 +335,88 @@ def generate_filter_report(stats_data: Dict[str, Any], output_path: str) -> str:
     return str(output_path)
 
 
+def generate_contacts_report(stats_data: Dict[str, Any], output_path: str) -> str:
+    """Generate HTML report for contacts command results.
+
+    Args:
+        stats_data: Dictionary containing contacts statistics
+        output_path: Path to write the HTML report
+
+    Returns:
+        The output path of the generated report
+    """
+    template = _load_template()
+
+    results = stats_data["results"]
+    params = stats_data["parameters"]
+
+    # Why segments took no part in any contact, as a share of all segments
+    segments = results["segments_seen"]
+    filter_table = []
+    for label, key in (("Unmapped", "unmapped"),
+                       (f"MAPQ < {params['mapq_threshold']}", "below_mapq"),
+                       ("Secondary records (ignored)", "secondary_ignored"),
+                       ("Supplementary records (ignored)", "supplementary_ignored"),
+                       ("Duplicate primary records (ignored)", "duplicate_primary")):
+        if results.get(key, 0) > 0:
+            pct = 100 * results[key] / segments if segments else 0
+            filter_table.append([label, _format_number(results[key]), f"{pct:.1f}%"])
+
+    contributing = results["reads_with_contacts"]
+    segment_stats_table = [
+        ["Reads seen", _format_number(results["reads_seen"])],
+        ["Reads with contacts", _format_number(contributing)],
+        ["Usable segments per contributing read (mean)",
+         f"{results['mean_usable_per_contributing_read']:.2f}"],
+        ["Usable segments per contributing read (median)",
+         f"{results['median_usable_per_contributing_read']:.0f}"],
+        ["Most usable segments in one read", _format_number(results["max_usable_in_read"])],
+        ["Contacts per contributing read (mean)",
+         f"{results['mean_contacts_per_contributing_read']:.2f}"],
+        ["Most contacts from one read", _format_number(results["max_contacts_in_read"])],
+        ["R1/R2 mates the pairs route would map", _format_number(results["pair_mates_equivalent"])],
+        ["Mapping work reduction", f"{results['mapping_work_reduction']:.1f}x"],
+    ]
+
+    template_data = {
+        "report_type": "Contacts",
+        "enzyme": f"MAPQ ≥ {params['mapq_threshold']}",
+        "input_file": stats_data["input"]["file"],
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+
+        "param_table": [
+            ["MAPQ Threshold", str(params["mapq_threshold"])],
+            ["Threads", str(params["threads"])],
+            ["Input sort order", stats_data["input"].get("sort_order") or "not in header"],
+            ["PA5 position", params["position"]],
+        ],
+
+        "summary_metrics": [
+            {"value": _format_number(results["segments_seen"]), "label": "Segments"},
+            {"value": _format_number(results["usable_segments"]), "label": "Usable Segments"},
+            {"value": _format_number(contributing), "label": "Reads with Contacts"},
+            {"value": _format_number(results["contacts_written"]), "label": "Contacts"},
+        ],
+
+        "filter_table": filter_table if filter_table else None,
+        "filter_caption": "Share of all segments seen" if filter_table else "",
+        "segment_stats_table": segment_stats_table,
+
+        "segment_length_histogram": None,
+        "sites_per_read_histogram": None,
+
+        "output_files": [stats_data["output"]["file"]],
+    }
+
+    html = template.render(**template_data)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        f.write(html)
+
+    return str(output_path)
+
+
 def write_qc_tsvs(results: Dict[str, Any], output_dir: str) -> List[str]:
     """Write QC results as TSV files to a subdirectory.
 

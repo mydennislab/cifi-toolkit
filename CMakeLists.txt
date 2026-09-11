@@ -32,9 +32,11 @@ nanobind_add_module(
     src/cifi_cpp/cifi.cpp
     src/cifi_cpp/core/enzyme.cpp
     src/cifi_cpp/core/digestion.cpp
+    src/cifi_cpp/core/segment_name.cpp
     src/cifi_cpp/stats/statistics.cpp
     src/cifi_cpp/io/writer.cpp
     src/cifi_cpp/filter/bam_filter.cpp
+    src/cifi_cpp/contacts/contacts.cpp
 )
 
 target_include_directories(_core PRIVATE 
