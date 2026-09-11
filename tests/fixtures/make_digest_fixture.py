@@ -13,6 +13,7 @@ installed cifi) with:
 
 import gzip
 import random
+import json
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,15 @@ OPTION_SETS = [
     ("hindiii_m2_gzip_fast", ["-e", "HindIII", "-m", "2", "--gzip", "--fast"]),
 ]
 
+
+
+def _relative(path):
+    """Express a path under the fixture directory relative to the repo root."""
+    path = str(path)
+    root = str(OUT)
+    if path.startswith(root):
+        return "tests/fixtures/digest" + path[len(root):]
+    return path
 
 def random_block(rng, length, avoid=(HINDIII, GATC)):
     """Random sequence free of the recognition sites used by the option sets."""
@@ -90,7 +100,13 @@ def write_expected(input_fastq):
                     shutil.copyfileobj(src, dst)
             else:
                 shutil.copy(plain, OUT / f"{prefix}_{mate}.fastq")
-        shutil.copy(work / f"{prefix}_stats.json", OUT / f"{prefix}_stats.json")
+        # The stats file records where it was generated; keep the fixture
+        # portable by rewriting those paths relative to the repository.
+        stats = json.loads((work / f"{prefix}_stats.json").read_text())
+        stats["input"]["path"] = _relative(stats["input"]["path"])
+        for key, value in stats.get("output", {}).items():
+            stats["output"][key] = _relative(value)
+        (OUT / f"{prefix}_stats.json").write_text(json.dumps(stats, indent=2) + "\n")
         shutil.rmtree(work)
 
 

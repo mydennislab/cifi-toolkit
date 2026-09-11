@@ -3,7 +3,7 @@
   "timestamp": "2026-09-11T09:59:15.445603",
   "input": {
     "file": "input.fastq",
-    "path": "/quobyte/mydennisgrp/users/mabuelanin/manuscripts/papers_workflow/vole/cifi-toolkit/tests/fixtures/digest/input.fastq",
+    "path": "tests/fixtures/digest/input.fastq",
     "format": "FASTQ"
   },
   "parameters": {
@@ -31,8 +31,8 @@
     "avg_pairs_per_read": 4.833333333333333
   },
   "output": {
-    "r1": "/quobyte/mydennisgrp/users/mabuelanin/manuscripts/papers_workflow/vole/cifi-toolkit/tests/fixtures/digest/work/hindiii_m2_gzip_fast_R1.fastq.gz",
-    "r2": "/quobyte/mydennisgrp/users/mabuelanin/manuscripts/papers_workflow/vole/cifi-toolkit/tests/fixtures/digest/work/hindiii_m2_gzip_fast_R2.fastq.gz"
+    "r1": "tests/fixtures/digest/work/hindiii_m2_gzip_fast_R1.fastq.gz",
+    "r2": "tests/fixtures/digest/work/hindiii_m2_gzip_fast_R2.fastq.gz"
   },
   "segment_lengths": {
     "count": 20,

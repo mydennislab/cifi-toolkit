@@ -3,7 +3,7 @@
   "timestamp": "2026-09-11T09:59:15.075958",
   "input": {
     "file": "input.fastq",
-    "path": "/quobyte/mydennisgrp/users/mabuelanin/manuscripts/papers_workflow/vole/cifi-toolkit/tests/fixtures/digest/input.fastq",
+    "path": "tests/fixtures/digest/input.fastq",
     "format": "FASTQ"
   },
   "parameters": {
@@ -31,8 +31,8 @@
     "avg_pairs_per_read": 5.5
   },
   "output": {
-    "r1": "/quobyte/mydennisgrp/users/mabuelanin/manuscripts/papers_workflow/vole/cifi-toolkit/tests/fixtures/digest/work/gatc_custom_l30_R1.fastq",
-    "r2": "/quobyte/mydennisgrp/users/mabuelanin/manuscripts/papers_workflow/vole/cifi-toolkit/tests/fixtures/digest/work/gatc_custom_l30_R2.fastq"
+    "r1": "tests/fixtures/digest/work/gatc_custom_l30_R1.fastq",
+    "r2": "tests/fixtures/digest/work/gatc_custom_l30_R2.fastq"
   },
   "segment_lengths": {
     "count": 7,
