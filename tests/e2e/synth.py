@@ -42,7 +42,7 @@ def make_reference(rng, n_contigs=4, length=60000, duplicated=3000):
     ref = {f"ctg{i + 1}": without_site(random_sequence(rng, length), rng)
            for i in range(n_contigs)}
     if n_contigs >= 2 and duplicated:
-        src, dst = f"ctg1", f"ctg{n_contigs}"
+        src, dst = "ctg1", f"ctg{n_contigs}"
         piece = ref[src][10000:10000 + duplicated]
         at = length // 2
         ref[dst] = ref[dst][:at] + piece + ref[dst][at + duplicated:]

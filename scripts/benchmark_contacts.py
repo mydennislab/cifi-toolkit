@@ -113,7 +113,7 @@ def main(argv=None):
     print(f"usable segments:      {stats['usable_segments']:,}")
     print(f"contacts written:     {stats['contacts_written']:,}")
     print(f"R1/R2 mates avoided:  {stats['pair_mates_equivalent']:,} "
-          f"({stats['mapping_work_reduction']:.1f}x fewer records to map)")
+          f"({stats['mapping_work_reduction']:.1f}x fewer sequences to map)")
     return 0
 
 

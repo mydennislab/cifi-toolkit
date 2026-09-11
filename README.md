@@ -526,7 +526,7 @@ per pair); with unique segments it costs `n`:
 |                   17 |      136 |                         272 |                             17 |
 
 `cifi contacts` reports both numbers for the input it saw
-(`pair_mates_equivalent` against `records_seen` in the statistics), so the
+(`pair_mates_equivalent` against `segments_seen` in the statistics), so the
 saving on a real sample can be read off directly.
 
 The intended scaffolding path is therefore:

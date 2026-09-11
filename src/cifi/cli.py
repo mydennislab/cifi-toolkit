@@ -955,8 +955,11 @@ def contacts_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
     contributing = result.reads_with_contacts
     usable = result.usable_per_read_stats
     per_read = result.contacts_per_read_stats
-    work_ratio = (result.pair_mates_equivalent / result.records_seen
-                  if result.records_seen else 0)
+    # Query sequences handed to the aligner: the pairs route maps n(n-1)
+    # mates per read, this route n segments (secondary and supplementary
+    # records are the aligner's, so they do not enter the comparison).
+    work_ratio = (result.pair_mates_equivalent / result.segments_seen
+                  if result.segments_seen else 0)
 
     if not quiet:
         click.echo("\nContacts Summary")
@@ -978,7 +981,7 @@ def contacts_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
                        f"max {result.max_contacts_in_read:,}")
         click.echo(f"Contacts written:   {result.contacts_written:,}")
         click.echo(f"{'─' * 40}")
-        click.echo(f"Mapped {result.records_seen:,} segment records instead of "
+        click.echo(f"Mapped {result.segments_seen:,} segments instead of "
                    f"{result.pair_mates_equivalent:,} R1/R2 mates ({work_ratio:.1f}x fewer)")
 
     if result.duplicate_primary:
