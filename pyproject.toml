@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cifi"
-version = "1.0.0"
+version = "1.1.0"
 description = "CiFi - toolkit for downstream processing of CiFi long reads."
 readme = "README.md"
 license = {text = "MIT"}

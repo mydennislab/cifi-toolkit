@@ -4,7 +4,7 @@ cifi - toolkit for downstream processing of CiFi long reads.
 https://voles.dennislab.org
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from ._core import (
     ContactsResult,
