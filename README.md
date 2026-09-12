@@ -31,7 +31,7 @@ CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. 
   * [Two representations of the same contacts](#two-representations-of-the-same-contacts)
   * [Segment names](#segment-names)
   * [Alignment filtering](#alignment-filtering)
-  * [PA5 output and coordinates](#pa5-output-and-coordinates)
+  * [Output formats: BED and PA5](#output-formats-bed-and-pa5)
   * [Checking the two routes against each other](#checking-the-two-routes-against-each-other)
 * [Digest behavior and options](#digest-behavior-and-options)
 
@@ -62,7 +62,7 @@ Unlike conventional paired-end Hi-C, a CiFi read can contain **multiple interact
 | --------------- | ----------------------------------------------------------------------- |
 | `cifi qc`       | Characterize CiFi reads and estimate digestion/contact yield            |
 | `cifi digest`   | Digest CiFi reads in silico; paired-end contacts and/or unique segments |
-| `cifi contacts` | Reconstruct pairwise contacts from mapped unique segments (YaHS PA5)    |
+| `cifi contacts` | Reconstruct pairwise contacts from mapped unique segments (YaHS BED/PA5) |
 | `cifi filter`   | Filter aligned paired contacts by mapping status and MAPQ               |
 | `cifi enzymes`  | List built-in restriction enzymes and cut positions                     |
 
@@ -89,7 +89,7 @@ R1 FASTQ + R2 FASTQ           unique segments FASTQ
        ▼                        cifi contacts
    cifi filter                        │
        │                              ▼
-       ├──────► contact maps     YaHS PA5 ──► scaffolding
+       ├──────► contact maps     YaHS BED ──► scaffolding
        └──────► scaffolding
 ```
 
@@ -322,24 +322,42 @@ report are the same with or without the option. See
 
 `cifi contacts` takes alignments of the unique segments and rebuilds every
 pairwise contact between the confidently mapped segments of each CiFi read,
-writing a [YaHS](https://github.com/c-zhou/yahs) PA5 file.
+writing a contacts file for [YaHS](https://github.com/c-zhou/yahs) in either
+of the two text formats it reads:
+
+* **BED** (`--format bed`, or an output name ending in `.bed`/`.bed.gz`): two
+  consecutive lines per contact, each carrying the actual aligned span of one
+  segment. YaHS normalises coverage from those spans and needs no read
+  length. This is the format to scaffold CiFi data with.
+* **PA5** (`--format pa5`, `.pa5`/`.pa5.gz`, and the default for any other
+  name): one line per contact with the alignment midpoints. YaHS rebuilds an
+  interval around each midpoint from a single global `--read-length`, which
+  fits fixed-length Hi-C reads but not CiFi segments.
 
 ```bash
+cifi digest sample.cifi.bam -e HindIII -o sample --gzip \
+    --segments-out sample.segments.fastq.gz
+
 minimap2 -t 32 -ax map-hifi assembly.fa sample.segments.fastq.gz \
     | samtools sort -n -@ 8 -o sample.segments.ns.bam
 
-cifi contacts sample.segments.ns.bam \
-    -o sample.pa5 \
-    -q 1
+cifi contacts sample.segments.ns.bam -o sample.bed -q 1 --format bed
+yahs -o scaffolds assembly.fa sample.bed
 ```
 
 This produces:
 
 ```text
-sample.pa5
+sample.bed
 sample_contacts_stats.json
 sample_contacts_report.html
 ```
+
+The same command with `-o sample.pa5` (or `--format pa5`) writes PA5, exactly
+as before; `--format` overrides the extension, with a warning, since YaHS
+picks its parser by extension unless given `--file-type`. The output takes
+its final name only once it is complete: a run that fails leaves no partial
+`.bed` or `.pa5` behind, and an earlier file of that name is left untouched.
 
 The BAM must be **grouped by read name** (`samtools sort -n`). A header that
 declares coordinate order is refused with a message saying so; a header
@@ -350,6 +368,7 @@ Processing is streaming: memory holds the segments of one read at a time.
 Options:
 
 ```text
+--format        bed or pa5; taken from the output name when omitted
 -q, --mapq      minimum MAPQ for a segment to take part      [default: 1]
 -t, --threads   BAM decompression threads                     [default: 4]
 --no-json       skip the statistics file
@@ -534,7 +553,7 @@ The intended scaffolding path is therefore:
 ```text
 CiFi reads ── cifi digest ──┬── R1/R2 ──────────────────────────────► hifiasm
                             └── unique segments ── minimap2 ── samtools sort -n
-                                                   ── cifi contacts ── PA5 ──► YaHS
+                                                   ── cifi contacts --format bed ── BED ──► YaHS
 ```
 
 Segments come out in native read orientation; `--revcomp-r2` is a paired-FASTQ
@@ -563,8 +582,8 @@ grouped wrongly.
 
 The R1/R2 pair names keep their existing form, `<read>_<i>_<j-i-1>` with `i`
 and `j` counting **retained** segments from 0. The two schemes coexist and
-describe the same segments in different terms. PA5 pair names use the segment
-scheme, joining the two segment names:
+describe the same segments in different terms. Contact pair names (PA5 column
+1, BED column 4) use the segment scheme, joining the two segment names:
 
 ```text
 <read>__CIFI_SEG__1__CIFI_SEG__3
@@ -594,20 +613,65 @@ own `-q` on top of the values written to the file.
 The statistics file records alignment records seen, distinct segments and
 reads, primary mapped / unmapped / secondary / supplementary counts, segments
 below the threshold, usable segments, reads with at least two usable segments,
-contacts written, the per-read maxima and means, and the mapping-work
-comparison against the pairs route.
+contacts written, the per-read maxima and means, the mapping-work comparison
+against the pairs route, and the output format. The statistics are the same
+whichever format was written; only the file differs.
 
-## PA5 output and coordinates
+## Output formats: BED and PA5
 
-Each PA5 row has seven tab-separated columns and there is no header line:
+Both formats carry the same contacts, contig names and MAPQs, filtered the
+same way; neither has a header line, and a `.gz` output name compresses the
+file (YaHS reads either). They differ in what YaHS can do with the
+coordinates.
+
+### BED
+
+Two consecutive lines per contact, five tab-separated columns each:
+
+```text
+contig1  start1  end1  pair_name  mapq1
+contig2  start2  end2  pair_name  mapq2
+```
+
+`start` is the 0-based reference start of the segment's primary alignment
+and `end` its exclusive end from the CIGAR (`M/=/X/D/N` consume reference).
+Every span is the segment's own: a 60 bp and a 12 kb segment of the same
+read are written with 60 bp and 12 kb intervals. Both lines carry the same
+pair name.
+
+YaHS reads it with `yahs -o out assembly.fa sample.bed`. What it does with
+the file is fixed by its source (`link.c` and `asset.c`, identical between
+the `main` branch and v1.2.2):
+
+* the two lines of a contact must be **consecutive**: the reader holds one
+  record and pairs it with the next only if the names match; otherwise the
+  held record is dropped and the new one takes its place
+  (`link.c`, `dump_links_from_bed_file`, lines 1581-1592 and 1652-1660);
+* **identical names** on the two lines are accepted (`asset.c`,
+  `is_read_pair`, lines 175-188: equal strings, or strings differing only in
+  the character after a trailing `/`), so no `/1` `/2` suffix is needed;
+* the columns are read as **contig, start, end, name, MAPQ**
+  (`sscanf(line, "%s %u %u %s %hhu", ...)`, `link.c` lines 1585 and 1591);
+* the link position is the **midpoint** of each interval,
+  `s/2 + e/2 + (s&1 && e&1)`, i.e. `floor((start + end) / 2)`
+  (`link.c` lines 1633-1634), which is exactly the value the PA5 row carries;
+* the **real `start`/`end` interval** goes into the coverage track used for
+  normalisation, clamped to the contig (`link.c` lines 1614-1621, then
+  `calc_cov_norms` at 1684).
+
+No read length enters into it. This is why BED is the format meant for
+scaffolding CiFi data.
+
+### PA5
+
+One line per contact, seven tab-separated columns:
 
 ```text
 pair_name  contig1  pos1  contig2  pos2  mapq1  mapq2
 ```
 
 YaHS reads it with `yahs -o out assembly.fa sample.pa5` (positions are taken
-verbatim, and `MIN(mapq1, mapq2)` is what its `-q` filters on). A `.gz` output
-name compresses the file; YaHS reads either.
+verbatim, and `MIN(mapq1, mapq2)` is what its `-q` filters on).
 
 The position is the **0-based midpoint of the alignment**:
 `pos0 + reference_span / 2`, floored, with the reference span summed over the
@@ -621,6 +685,20 @@ equivalent name-sorted BAM. Strand does not enter into it. The lab script that
 previously converted segment tables to pairs wrote 1-based alignment starts
 into a different (4DN `.pairs`) format, which is why the choice is documented
 here rather than inherited.
+
+What PA5 cannot carry is the extent of the alignment. YaHS's PA5 reader
+halves its `--read-length` (default 150) and takes
+`[pos - read_length/2, pos + read_length/2]` as every segment's interval for
+coverage normalisation (`link.c`, `dump_links_from_pa5_file`, lines 1726 and
+1762-1765). One global length is right for Illumina Hi-C pairs and wrong for
+CiFi segments, whose lengths span orders of magnitude. PA5 remains supported
+as a general contact table; for YaHS scaffolding, write BED.
+
+Reducing a BED file to midpoints reproduces the PA5 file exactly (same
+contacts, coordinates and MAPQs), and YaHS derives byte-identical link
+records from the two; only its coverage normalisation differs. The test
+suite checks the first, and, when `yahs` is on `PATH`, runs both formats
+through it.
 
 ## Checking the two routes against each other
 
@@ -639,6 +717,7 @@ minimap2 -t 32 -ax map-hifi assembly.fa sample.segments.fastq.gz \
     | samtools sort -n -@ 8 -o sample.segments.ns.bam
 cifi contacts sample.segments.ns.bam -o sample.pa5 -q 1
 wc -l sample.pa5
+cifi contacts sample.segments.ns.bam -o sample.bed -q 1   # for yahs
 
 # both routes side by side, with the mapping-work reduction
 python tests/e2e/equivalence.py --workdir e2e \
@@ -1002,7 +1081,7 @@ R1 FASTQ                R2 FASTQ           minimap2, once
     ▼                       ▼              cifi contacts
  hifiasm                 mapping                 │
 phasing / assembly          │                    ▼
-                            ▼                YaHS PA5
+                            ▼            YaHS BED (or PA5)
                        cifi filter               │
                             │                    ▼
                   ┌─────────┴─────────┐     scaffolding
