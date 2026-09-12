@@ -21,6 +21,7 @@
 #include "core/digestion.hpp"
 #include "core/segment_name.hpp"
 #include "stats/statistics.hpp"
+#include "io/hts_handles.hpp"
 #include "io/writer.hpp"
 #include "filter/bam_filter.hpp"
 #include "contacts/contacts.hpp"
@@ -301,18 +302,19 @@ static void process_bam_reads(
     cifi::FastqWriter* writer_segments,
     cifi::ProcessingResult& result
 ) {
-    htsFile *fp = hts_open(input_path.c_str(), "r");
+    // Owning handles: process_single_read throws on a read name that
+    // collides with the segment naming contract and the writers throw on a
+    // failed write, so releasing the file cannot wait for the end of the loop.
+    cifi::HtsFilePtr fp(hts_open(input_path.c_str(), "r"));
     if (!fp) throw std::runtime_error("Cannot open: " + input_path);
 
-    sam_hdr_t *hdr = sam_hdr_read(fp);
-    if (!hdr) {
-        hts_close(fp);
-        throw std::runtime_error("Cannot read header: " + input_path);
-    }
+    cifi::SamHeaderPtr hdr(sam_hdr_read(fp.get()));
+    if (!hdr) throw std::runtime_error("Cannot read header: " + input_path);
 
-    bam1_t *b = bam_init1();
+    cifi::BamRecordPtr rec(bam_init1());
+    bam1_t *b = rec.get();
 
-    while (sam_read1(fp, hdr, b) >= 0) {
+    while (sam_read1(fp.get(), hdr.get(), b) >= 0) {
         // Secondary and supplementary records are further alignments of a read
         // that was already counted, so they must not inflate reads_in - the new
         // input statistics are only recorded for the records we process.
@@ -349,10 +351,6 @@ static void process_bam_reads(
         cifi::process_single_read(name, sequence, quality, config,
                                   writer_r1, writer_r2, result, writer_segments);
     }
-
-    bam_destroy1(b);
-    sam_hdr_destroy(hdr);
-    hts_close(fp);
 }
 
 // Helper: read FASTQ sequence into a read for processing

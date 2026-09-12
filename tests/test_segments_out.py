@@ -7,6 +7,7 @@ option is used, and R2 reverse complementation must not reach this file.
 """
 
 import gzip
+import os
 import subprocess
 import sys
 
@@ -325,3 +326,24 @@ def test_cli_reports_the_segments_file(tmp_path):
     stats = json.loads((tmp_path / "out_stats.json").read_text())
     assert stats["results"]["segments_written"] == 4
     assert stats["output"]["segments"] == str(segs)
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc to count open files")
+def test_a_refused_bam_read_does_not_leak_the_open_file(tmp_path):
+    """The reader throws mid-file; the htslib handle must go with the exception."""
+    sam = tmp_path / "in.sam"
+    sam.write_text("@HD\tVN:1.6\tSO:unknown\n"
+                   f"r1\t4\t*\t0\t0\t*\t*\t0\t0\t{make_read(400, 300, 250)}\t*\n"
+                   f"read{SEP}1\t4\t*\t0\t0\t*\t*\t0\t0\t{make_read(400, 300, 250)}\t*\n")
+    r1, r2 = tmp_path / "o_R1.fastq", tmp_path / "o_R2.fastq"
+
+    def failing_digest():
+        with pytest.raises(RuntimeError, match=SEP):
+            process_reads(str(sam), str(r1), str(r2), "HindIII", 2, 60, True, False, False, False,
+                          str(tmp_path / "segs.fastq"))
+
+    failing_digest()   # first call: whatever lazy state htslib keeps is set up now
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(20):
+        failing_digest()
+    assert len(os.listdir("/proc/self/fd")) == before
