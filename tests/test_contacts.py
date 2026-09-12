@@ -406,6 +406,20 @@ def test_cli_fails_clearly_on_coordinate_sorted_input(tmp_path):
     assert "samtools sort -n" in proc.stderr
 
 
+def test_query_grouped_header_is_accepted_without_warning(tmp_path):
+    """minimap2's own output declares SO:unsorted GO:query; that is grouped input."""
+    sam = tmp_path / "grouped.sam"
+    write_sam(sam, [(seg("r", k), 0, "ctg1", 100 * k, 60, "50M") for k in (1, 2)],
+              sort_order="unsorted", group_order="query")
+    proc = subprocess.run(
+        [sys.executable, "-m", "cifi.cli", "contacts", str(sam), "-o", str(tmp_path / "o.pa5"),
+         "--no-report", "--no-json"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Warning" not in proc.stderr, proc.stderr
+
+
 # --- L: BED output ----------------------------------------------------------
 #
 # yahs's BED reader (link.c, dump_links_from_bed_file) pairs each record with

@@ -53,6 +53,7 @@ struct ContactsResult {
     uint64_t max_usable_in_read = 0;
     uint64_t max_contacts_in_read = 0;
     std::string sort_order;              // @HD SO of the input, empty when absent
+    std::string group_order;             // @HD GO, "query" when grouped but unsorted
 
     // Over contributing reads only. Bin size 1 keeps these exact while
     // holding one counter per distinct value instead of one per read.

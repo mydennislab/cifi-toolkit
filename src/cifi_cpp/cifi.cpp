@@ -715,6 +715,7 @@ NB_MODULE(_core, m) {
         .def_ro("max_usable_in_read", &cifi::ContactsResult::max_usable_in_read)
         .def_ro("max_contacts_in_read", &cifi::ContactsResult::max_contacts_in_read)
         .def_ro("sort_order", &cifi::ContactsResult::sort_order)
+        .def_ro("group_order", &cifi::ContactsResult::group_order)
         .def_ro("usable_per_read_stats", &cifi::ContactsResult::usable_per_read_stats)
         .def_ro("contacts_per_read_stats", &cifi::ContactsResult::contacts_per_read_stats);
 

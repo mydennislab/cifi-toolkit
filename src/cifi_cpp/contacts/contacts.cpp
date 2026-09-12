@@ -188,11 +188,16 @@ ContactsResult reconstruct_contacts(
     // Only a name-grouped input keeps a read's segments together; refuse the
     // one order that is known to scatter them rather than stream through it
     // and emit a fraction of the contacts.
-    kstring_t so = KS_INITIALIZE;
-    if (sam_hdr_find_tag_hd(hdr.get(), "SO", &so) == 0 && ks_len(&so) > 0) {
-        result.sort_order.assign(ks_str(&so), ks_len(&so));
+    kstring_t tag = KS_INITIALIZE;
+    if (sam_hdr_find_tag_hd(hdr.get(), "SO", &tag) == 0 && ks_len(&tag) > 0) {
+        result.sort_order.assign(ks_str(&tag), ks_len(&tag));
     }
-    ks_free(&so);
+    // minimap2 declares its own grouping as SO:unsorted GO:query; the caller
+    // needs both tags to tell a grouped input from an undeclared one.
+    if (sam_hdr_find_tag_hd(hdr.get(), "GO", &tag) == 0 && ks_len(&tag) > 0) {
+        result.group_order.assign(ks_str(&tag), ks_len(&tag));
+    }
+    ks_free(&tag);
     if (result.sort_order == "coordinate") {
         throw std::runtime_error(
             input_path + " is sorted by coordinate; cifi contacts needs the segments "

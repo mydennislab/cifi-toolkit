@@ -1027,9 +1027,12 @@ def contacts_cmd(input_bam, output, output_format, mapq, threads, report, write_
         click.echo(f"Warning: {result.duplicate_primary:,} extra primary records for segments "
                    "already seen were ignored (first record kept); is the input a "
                    "concatenation of several alignments?", err=True)
-    if result.sort_order != "queryname":
-        click.echo("Warning: the header does not declare queryname sort order; segments "
-                   "were taken to be grouped by read as minimap2 emits them.", err=True)
+    # samtools sort -n declares SO:queryname; minimap2's own output declares
+    # its grouping as SO:unsorted GO:query. Either is a grouped input.
+    if result.sort_order != "queryname" and result.group_order != "query":
+        click.echo("Warning: the header declares neither queryname sort order nor query "
+                   "grouping; segments were taken to be grouped by read as minimap2 "
+                   "emits them.", err=True)
 
     output_prefix = _strip_contacts_suffix(output)
     stats_data = {
@@ -1039,6 +1042,7 @@ def contacts_cmd(input_bam, output, output_format, mapq, threads, report, write_
             "file": os.path.basename(input_bam),
             "path": os.path.abspath(input_bam),
             "sort_order": result.sort_order,
+            "group_order": result.group_order,
         },
         "parameters": {
             "mapq_threshold": mapq,
