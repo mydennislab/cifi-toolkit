@@ -5,6 +5,9 @@
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
+#include <random>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace cifi {
 
@@ -142,19 +145,50 @@ std::unique_ptr<FastqWriter> make_writer(const std::string& path, bool force_gzi
 
 static const size_t TEXT_WRITER_BLOCK = 1 << 20;
 
+// A temporary name beside path that this run alone holds. A fixed name such
+// as path + ".tmp" would let two runs asked for the same output truncate one
+// file and interleave in it, and the survivor's rename would promote the
+// mixture; O_EXCL cannot hand the same name to both. The descriptor is
+// closed again because the writer opens the name through the stream or
+// zlib; the file stays claimed either way, with the usual permissions.
+static std::string claim_temp_name(const std::string& path) {
+    static const char alnum[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    std::random_device rd;
+    std::uniform_int_distribution<int> pick(0, sizeof(alnum) - 2);
+    for (int attempt = 0; attempt < 100; attempt++) {
+        std::string candidate = path + ".tmp.";
+        for (int i = 0; i < 6; i++) candidate += alnum[pick(rd)];
+        int fd = open(candidate.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
+        if (fd >= 0) {
+            close(fd);
+            return candidate;
+        }
+        if (errno != EEXIST) {
+            throw std::runtime_error("Cannot open for writing: " + path + ": " +
+                                     std::strerror(errno));
+        }
+    }
+    throw std::runtime_error("No free temporary name beside " + path);
+}
+
 TextWriter::TextWriter(const std::string& path)
-    : path_(path), tmp_path_(path + ".tmp") {
+    : path_(path), tmp_path_(claim_temp_name(path)) {
     // A sibling of the final path: rename() only replaces atomically within
-    // one filesystem. Compression follows the final name, as before.
+    // one filesystem. Compression follows the final name, as before. The
+    // name is already claimed, so a failure to open it must drop the claim:
+    // no destructor runs for a constructor that throws.
     if (ends_with_gz(path)) {
         gz_ = gzopen(tmp_path_.c_str(), "wb");
         if (!gz_) {
-            throw std::runtime_error("Cannot open for gzip writing: " + tmp_path_);
+            discard();
+            throw std::runtime_error("Cannot open for gzip writing: " + path);
         }
     } else {
         out_.open(tmp_path_);
         if (!out_) {
-            throw std::runtime_error("Cannot open for writing: " + tmp_path_);
+            discard();
+            throw std::runtime_error("Cannot open for writing: " + path);
         }
     }
     buf_.reserve(TEXT_WRITER_BLOCK + 4096);

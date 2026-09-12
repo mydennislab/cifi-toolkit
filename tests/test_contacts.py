@@ -670,6 +670,38 @@ def test_a_failed_run_keeps_the_previous_output(tmp_path):
     assert out.read_text() == "previous\n"
 
 
+def test_concurrent_runs_on_one_output_name_do_not_share_a_temporary(tmp_path):
+    """Each run writes its own temporary; whichever lands last is complete.
+
+    Three reads of 150 segments with MAPQs cycling 0/10/40/60, so different
+    thresholds give different files; a temporary shared between the runs
+    would have them truncate and overwrite each other's bytes.
+    """
+    records = [(seg(f"big{r}", k), 0, "ctg1", 1 + 10 * k, (0, 10, 40, 60)[k % 4], "50M")
+               for r in range(3) for k in range(1, 151)]
+    sam = tmp_path / "in.sam"
+    write_sam(sam, records)
+    other = tmp_path / "out.pa5.tmp"
+    other.write_text("temporary of another run\n")
+
+    def cmd(mapq, out):
+        return [sys.executable, "-m", "cifi.cli", "contacts", str(sam), "-o", str(out),
+                "-q", str(mapq), "--no-report", "--no-json", "--quiet"]
+
+    thresholds = (1, 11, 41)
+    procs = [subprocess.Popen(cmd(q, tmp_path / "out.pa5")) for q in thresholds]
+    assert [p.wait() for p in procs] == [0, 0, 0]
+    for q in thresholds:
+        subprocess.run(cmd(q, tmp_path / f"q{q}.pa5"), check=True)
+
+    expected = {q: (tmp_path / f"q{q}.pa5").read_bytes() for q in thresholds}
+    assert len(set(expected.values())) == 3
+    assert (tmp_path / "out.pa5").read_bytes() in expected.values()
+    assert other.read_text() == "temporary of another run\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "in.sam", "out.pa5", "out.pa5.tmp", "q1.pa5", "q11.pa5", "q41.pa5"]
+
+
 # --- yahs end to end --------------------------------------------------------
 
 def write_reference(path, contigs, rng, width=60):

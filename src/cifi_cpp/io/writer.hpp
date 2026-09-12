@@ -68,10 +68,10 @@ std::unique_ptr<FastqWriter> make_writer(const std::string& path, bool force_gzi
  * Lines are collected into a block before they reach the file, so writing a
  * contact costs an append rather than a syscall or a deflate call each.
  *
- * The file is written under a temporary name beside the requested one and
- * renamed to it by close(). A run that throws, or ends without close(),
- * removes the temporary instead, so a pipeline never finds a truncated file
- * under the name it asked for.
+ * The file is written under a temporary name beside the requested one,
+ * unique to this run, and renamed to it by close(). A run that throws, or
+ * ends without close(), removes the temporary instead, so a pipeline never
+ * finds a truncated file under the name it asked for.
  */
 class TextWriter {
 public:
