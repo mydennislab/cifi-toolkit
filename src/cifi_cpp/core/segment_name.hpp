@@ -43,9 +43,9 @@ struct ParsedSegmentName {
 ParsedSegmentName parse_segment_name(const std::string& qname);
 
 /**
- * PA5 pair name: the two segment names joined, sharing the read prefix,
- * e.g. "<read>__CIFI_SEG__1__CIFI_SEG__3". Unique per unordered pair since
- * i < j is enforced by the caller.
+ * Contact pair name (PA5 column 1, BED column 4): the two segment names
+ * joined, sharing the read prefix, e.g. "<read>__CIFI_SEG__1__CIFI_SEG__3".
+ * Unique per unordered pair since i < j is enforced by the caller.
  */
 std::string contact_name(const std::string& read_name, uint32_t i, uint32_t j);
 

@@ -494,11 +494,20 @@ cifi::ContactsResult reconstruct_contacts(
     const std::string& input_path,
     const std::string& output_path,
     int mapq = 1,
-    int threads = 4
+    int threads = 4,
+    const std::string& format = "pa5"
 ) {
     cifi::ContactsConfig config;
     config.min_mapq = mapq;
     config.threads = threads;
+    if (format == "pa5") {
+        config.format = cifi::ContactsFormat::PA5;
+    } else if (format == "bed") {
+        config.format = cifi::ContactsFormat::BED;
+    } else {
+        throw std::invalid_argument("Unknown contacts format: " + format +
+                                    " (expected pa5 or bed)");
+    }
     return cifi::reconstruct_contacts(input_path, output_path, config);
 }
 
@@ -714,9 +723,13 @@ NB_MODULE(_core, m) {
           nb::arg("output_path"),
           nb::arg("mapq") = 1,
           nb::arg("threads") = 4,
+          nb::arg("format") = "pa5",
           "Expand a name-grouped BAM of mapped unique segments into all pairwise\n"
-          "contacts per read, written as YaHS PA5 (.gz for gzip).\n"
-          "Primary mapped records at or above mapq take part; C(k,2) rows per read.");
+          "contacts per read, for YaHS (.gz for gzip). format 'pa5' writes one\n"
+          "row per contact with the alignment midpoints; 'bed' writes two\n"
+          "consecutive rows per contact with each segment's aligned span.\n"
+          "Primary mapped records at or above mapq take part; C(k,2) contacts per read.\n"
+          "The output appears under its name only once complete.");
 
     m.def("pa5_position", &cifi::pa5_position,
           nb::arg("pos0"), nb::arg("end0"),

@@ -2,14 +2,17 @@
 
 The input is a name-grouped BAM (SAM here; htslib reads both) of segments
 named by `cifi digest --segments-out`. Every read with k usable segments
-must give exactly C(k,2) PA5 rows, never a self pair, never a duplicate, and
-never a pair across reads. Positions follow yahs's own name-sorted-BAM
-convention: the 0-based alignment midpoint.
+must give exactly C(k,2) contacts, never a self pair, never a duplicate, and
+never a pair across reads. PA5 positions follow yahs's own name-sorted-BAM
+convention: the 0-based alignment midpoint. BED carries the aligned span of
+each segment instead, two consecutive records per contact.
 """
 
 import gzip
 import json
+import random
 import re
+import shutil
 import subprocess
 import sys
 
@@ -33,20 +36,46 @@ def sam_record(qname, flag, rname, pos, mapq, cigar):
     return f"{qname}\t{flag}\t{rname}\t{pos}\t{mapq}\t{cigar}\t*\t0\t0\t{seq}\t*"
 
 
-def write_sam(path, records, sort_order="queryname"):
-    header = ["@HD\tVN:1.6" + (f"\tSO:{sort_order}" if sort_order else "")]
-    header += [f"@SQ\tSN:{name}\tLN:{length}" for name, length in CONTIGS]
+def write_sam(path, records, sort_order="queryname", contigs=CONTIGS, group_order=None):
+    hd = "@HD\tVN:1.6" + (f"\tSO:{sort_order}" if sort_order else "")
+    header = [hd + (f"\tGO:{group_order}" if group_order else "")]
+    header += [f"@SQ\tSN:{name}\tLN:{length}" for name, length in contigs]
     with open(path, "w") as fh:
         fh.write("\n".join(header + [sam_record(*r) for r in records]) + "\n")
 
 
-def read_pa5(path):
+def read_rows(path, columns):
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt") as fh:
         rows = [ln.rstrip("\n").split("\t") for ln in fh if ln.strip()]
     for row in rows:
-        assert len(row) == 7, row
+        assert len(row) == columns, row
     return rows
+
+
+def read_pa5(path):
+    return read_rows(path, 7)
+
+
+def read_bed(path):
+    return read_rows(path, 5)
+
+
+def bed_pairs(rows):
+    """(name, record, record) per two consecutive rows, as yahs reads them."""
+    assert len(rows) % 2 == 0, "BED rows come in pairs"
+    pairs = []
+    for a, b in zip(rows[0::2], rows[1::2]):
+        assert a[3] == b[3], (a, b)
+        pairs.append((a[3], a, b))
+    return pairs
+
+
+def bed_as_pa5(rows):
+    """Reduce BED pairs to the PA5 rows yahs would derive: floor((start + end) / 2)."""
+    def mid(rec):
+        return str((int(rec[1]) + int(rec[2])) // 2)
+    return [[name, a[0], mid(a), b[0], mid(b), a[4], b[4]] for name, a, b in bed_pairs(rows)]
 
 
 def split_pair_name(name):
@@ -54,13 +83,15 @@ def split_pair_name(name):
     return read, int(i), int(j)
 
 
-def run_contacts(tmp_path, records, *, mapq=1, sort_order="queryname", output="out.pa5"):
+def run_contacts(tmp_path, records, *, mapq=1, sort_order="queryname", output=None,
+                 fmt="pa5", contigs=CONTIGS, group_order=None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     sam = tmp_path / "in.sam"
-    write_sam(sam, records, sort_order)
-    out = tmp_path / output
-    result = reconstruct_contacts(str(sam), str(out), mapq, 1)
-    return read_pa5(out), result
+    write_sam(sam, records, sort_order, contigs, group_order)
+    out = tmp_path / (output or f"out.{fmt}")
+    result = reconstruct_contacts(str(sam), str(out), mapq, 1, fmt)
+    rows = read_bed(out) if fmt == "bed" else read_pa5(out)
+    return rows, result
 
 
 def seg(read, k):
@@ -373,3 +404,242 @@ def test_cli_fails_clearly_on_coordinate_sorted_input(tmp_path):
     )
     assert proc.returncode == 1
     assert "samtools sort -n" in proc.stderr
+
+
+# --- L: BED output ----------------------------------------------------------
+#
+# yahs's BED reader (link.c, dump_links_from_bed_file) pairs each record with
+# the next one when the names match, takes columns as contig, start, end,
+# name, MAPQ, links the two midpoints and feeds the spans to its coverage
+# normalisation. These tests pin the file to that reader.
+
+def test_bed_writes_the_alignment_span_and_mapq_of_each_segment(tmp_path):
+    records = [
+        (seg("r", 1), 0, "chr1", 101, 60, "100M"),   # 0-based [100, 200)
+        (seg("r", 2), 0, "chr2", 501, 35, "150M"),   # 0-based [500, 650)
+    ]
+    rows, result = run_contacts(tmp_path, records, fmt="bed",
+                                contigs=(("chr1", 1000), ("chr2", 1000)))
+
+    name = seg("r", 1) + SEP + "2"
+    assert rows == [["chr1", "100", "200", name, "60"], ["chr2", "500", "650", name, "35"]]
+    assert (tmp_path / "out.bed").read_text() == (
+        f"chr1\t100\t200\t{name}\t60\nchr2\t500\t650\t{name}\t35\n")
+    assert result.contacts_written == 1
+
+
+def test_bed_spans_follow_each_alignment_not_a_read_length(tmp_path):
+    """Segment lengths vary by orders of magnitude and every span is its own."""
+    cigars = {1: "50M", 2: "1200M", 3: "7M", 4: "300M2I40D100M5S", 5: "10S2000M3I"}
+    ref_len = {k: sum(int(n) for n, op in re.findall(r"(\d+)([MIDNSHP=X])", c) if op in "MDN=X")
+               for k, c in cigars.items()}
+    records = [(seg("r", k), 0, "ctg1", 1 + 5000 * k, 60, c) for k, c in cigars.items()]
+    rows, result = run_contacts(tmp_path, records, fmt="bed")
+
+    assert result.contacts_written == 10 and len(rows) == 20
+    spans = {}
+    for name, a, b in bed_pairs(rows):
+        _, i, j = split_pair_name(name)
+        for k, rec in ((i, a), (j, b)):
+            spans.setdefault(k, set()).add((int(rec[1]), int(rec[2])))
+    assert spans == {k: {(5000 * k, 5000 * k + ref_len[k])} for k in cigars}
+    assert sorted(e - s for k in cigars for s, e in spans[k]) == [7, 50, 440, 1200, 2000]
+
+
+def test_bed_records_of_a_contact_are_adjacent(tmp_path):
+    records = [(seg("r1", k), 0, "ctg1", 1000 * k, 60, "500M") for k in (1, 2, 3, 4)]
+    rows, result = run_contacts(tmp_path, records, fmt="bed")
+
+    assert result.contacts_written == 6 and len(rows) == 12
+    pairs = bed_pairs(rows)
+    assert [split_pair_name(name)[1:] for name, _, _ in pairs] == [
+        (1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]
+    assert len({name for name, _, _ in pairs}) == 6
+    # a record never sits next to one of another contact
+    for k in range(0, 12, 2):
+        assert rows[k][3] == rows[k + 1][3]
+        if k + 2 < 12:
+            assert rows[k + 1][3] != rows[k + 2][3]
+
+
+MIXED_RECORDS = [
+    (seg("a", 1), 0, "ctg1", 1001, 60, "5S100M2I3D50M4S"),
+    (seg("a", 2), 16, "ctg2", 8, 42, "11M"),
+    (seg("a", 3), 0, "ctg1", 4001, 0, "50M"),            # below MAPQ 1
+    (seg("a", 4), 4, "*", 0, 0, "*"),                     # unmapped
+    (seg("a", 5), 0, "ctg2", 20001, 17, "10=5X10N5M3I2S"),
+    (seg("b", 2), 0, "ctg1", 7, 60, "10M"),
+    (seg("b", 2), 256, "ctg2", 7001, 0, "10M"),           # secondary
+    (seg("b", 3), 0, "ctg1", 9001, 30, "60M40S"),
+    (seg("b", 3), 2048, "ctg2", 9001, 60, "60H40M"),      # supplementary
+    (seg("b", 7), 0, "ctg2", 1, 60, "1M"),
+    (seg("c", 1), 0, "ctg1", 100, 60, "50M"),             # alone: no contact
+]
+
+
+def test_bed_midpoints_reproduce_the_pa5_rows(tmp_path):
+    """Same BAM, both formats: contacts, contigs, midpoints and MAPQs agree."""
+    pa5_rows, pa5_result = run_contacts(tmp_path / "pa5", MIXED_RECORDS, fmt="pa5")
+    bed_rows, bed_result = run_contacts(tmp_path / "bed", MIXED_RECORDS, fmt="bed")
+
+    assert pa5_rows and bed_as_pa5(bed_rows) == pa5_rows
+    assert len(bed_rows) == 2 * len(pa5_rows) == 2 * 6
+    # the midpoint yahs computes from the BED span is the PA5 value
+    for name, a, b in bed_pairs(bed_rows):
+        row = next(r for r in pa5_rows if r[0] == name)
+        assert pa5_position(int(a[1]), int(a[2])) == int(row[2])
+        assert pa5_position(int(b[1]), int(b[2])) == int(row[4])
+    for field in ("records_seen", "segments_seen", "reads_seen", "primary_mapped", "unmapped",
+                  "secondary_ignored", "supplementary_ignored", "duplicate_primary",
+                  "below_mapq", "usable_segments", "reads_with_contacts", "contacts_written",
+                  "pair_mates_equivalent", "max_usable_in_read", "max_contacts_in_read"):
+        assert getattr(bed_result, field) == getattr(pa5_result, field), field
+
+
+@pytest.mark.parametrize("mapq", [1, 31])
+def test_filtering_is_the_same_in_both_formats(tmp_path, mapq):
+    pa5_rows, pa5_result = run_contacts(tmp_path / "pa5", MIXED_RECORDS, fmt="pa5", mapq=mapq)
+    bed_rows, bed_result = run_contacts(tmp_path / "bed", MIXED_RECORDS, fmt="bed", mapq=mapq)
+
+    assert {name for name, _, _ in bed_pairs(bed_rows)} == {row[0] for row in pa5_rows}
+    assert bed_result.below_mapq == pa5_result.below_mapq == (1 if mapq == 1 else 3)
+    assert bed_result.unmapped == pa5_result.unmapped == 1
+    assert bed_result.secondary_ignored == pa5_result.secondary_ignored == 1
+    assert bed_result.supplementary_ignored == pa5_result.supplementary_ignored == 1
+    assert bed_result.contacts_written == pa5_result.contacts_written == len(pa5_rows)
+    # placements of the ignored records reach neither output
+    excluded = {("ctg1", "4000"), ("ctg2", "7000"), ("ctg2", "9000")}
+    assert not any((rec[0], rec[1]) in excluded for rec in bed_rows)
+    assert not any((row[1], row[2]) in excluded or (row[3], row[4]) in excluded
+                   for row in pa5_rows)
+    assert all(int(rec[4]) >= mapq for rec in bed_rows)
+
+
+def test_bed_gz_output_is_gzip(tmp_path):
+    records = [(seg("r", k), 0, "ctg1", 100 * k, 60, "50M") for k in (1, 2, 3)]
+    rows, _ = run_contacts(tmp_path, records, fmt="bed", output="out.bed.gz")
+
+    assert (tmp_path / "out.bed.gz").read_bytes()[:2] == b"\x1f\x8b"
+    assert len(rows) == 6
+
+
+def test_unknown_format_is_rejected(tmp_path):
+    sam = tmp_path / "in.sam"
+    write_sam(sam, [(seg("r", 1), 0, "ctg1", 100, 60, "50M")])
+    with pytest.raises(ValueError, match="pa5 or bed"):
+        reconstruct_contacts(str(sam), str(tmp_path / "out.vcf"), 1, 1, "vcf")
+    assert not (tmp_path / "out.vcf").exists()
+
+
+def test_cli_infers_bed_from_the_output_name(tmp_path):
+    sam = tmp_path / "in.sam"
+    write_sam(sam, [(seg("r", k), 0, "ctg1", 100 * k, 60, "50M") for k in (1, 2)])
+    out = tmp_path / "sample.bed"
+    proc = subprocess.run(
+        [sys.executable, "-m", "cifi.cli", "contacts", str(sam), "-o", str(out), "-q", "1"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Warning" not in proc.stderr, proc.stderr
+    assert len(read_bed(out)) == 2
+
+    stats = json.loads((tmp_path / "sample_contacts_stats.json").read_text())
+    assert stats["parameters"]["output_format"] == "bed"
+    assert stats["results"]["contacts_written"] == 1
+    assert (tmp_path / "sample_contacts_report.html").exists()
+
+
+@pytest.mark.parametrize("output,flag,expected", [
+    ("x.pa5", None, "pa5"),
+    ("x.pa5.gz", None, "pa5"),
+    ("x.bed.gz", None, "bed"),
+    ("x.txt", None, "pa5"),          # no known extension: PA5 as before
+    ("x.txt", "bed", "bed"),
+    ("x.pa5", "bed", "bed"),         # explicit wins, with a warning
+    ("x.bed", "PA5", "pa5"),
+])
+def test_cli_format_option_and_inference(tmp_path, output, flag, expected):
+    sam = tmp_path / "in.sam"
+    write_sam(sam, [(seg("r", k), 0, "ctg1", 100 * k, 60, "50M") for k in (1, 2)])
+    out = tmp_path / output
+    cmd = [sys.executable, "-m", "cifi.cli", "contacts", str(sam), "-o", str(out),
+           "--no-report", "--quiet"]
+    if flag:
+        cmd += ["--format", flag]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+    rows = read_bed(out) if expected == "bed" else read_pa5(out)
+    assert len(rows) == (2 if expected == "bed" else 1)
+    stats = json.loads((tmp_path / "x_contacts_stats.json").read_text())
+    assert stats["parameters"]["output_format"] == expected
+    named = "bed" if ".bed" in output else "pa5" if ".pa5" in output else None
+    if named and named != expected:
+        assert "yahs will read it as" in proc.stderr
+    else:
+        assert "Warning" not in proc.stderr, proc.stderr
+
+
+# --- yahs end to end --------------------------------------------------------
+
+def write_reference(path, contigs, rng, width=60):
+    """FASTA plus the .fai yahs opens beside it, written by hand."""
+    fai, offset = [], 0
+    with open(path, "w") as fa:
+        for name, length in contigs:
+            header = f">{name}\n"
+            fa.write(header)
+            offset += len(header)
+            fai.append(f"{name}\t{length}\t{offset}\t{width}\t{width + 1}")
+            seq = "".join(rng.choice("ACGT") for _ in range(length))
+            for i in range(0, length, width):
+                line = seq[i:i + width] + "\n"
+                fa.write(line)
+                offset += len(line)
+    with open(f"{path}.fai", "w") as fh:
+        fh.write("\n".join(fai) + "\n")
+
+
+def synthetic_segments(contigs, rng, n_reads):
+    """Segments of varying length, mostly near each other on one contig."""
+    records = []
+    for r in range(n_reads):
+        cname, clen = contigs[rng.randrange(len(contigs))]
+        anchor = rng.randrange(clen)
+        for k in range(1, rng.choice([2, 3, 3, 4, 5, 6]) + 1):
+            length = rng.randint(100, 3000)
+            if rng.random() < 0.15:
+                cname2, clen2 = contigs[rng.randrange(len(contigs))]
+                pos = rng.randrange(1, clen2 - length)
+                records.append((seg(f"read{r}", k), 0, cname2, pos, 60, f"{length}M"))
+            else:
+                pos = min(max(1, anchor + int(rng.gauss(0, 20000))), clen - length)
+                flag = 16 if rng.random() < 0.5 else 0
+                records.append((seg(f"read{r}", k), flag, cname, pos, 60, f"{length}M"))
+    return records
+
+
+@pytest.mark.skipif(shutil.which("yahs") is None, reason="yahs is not on PATH")
+@pytest.mark.parametrize("fmt", ["bed", "pa5"])
+def test_yahs_reads_the_contacts_and_runs_to_completion(tmp_path, fmt):
+    """yahs pairs every BED record with its neighbour; no --read-length is passed."""
+    rng = random.Random(11)
+    contigs = (("ctg1", 300000), ("ctg2", 200000), ("ctg3", 150000))
+    ref = tmp_path / "ref.fa"
+    write_reference(ref, contigs, rng)
+    rows, result = run_contacts(tmp_path, synthetic_segments(contigs, rng, 600),
+                                fmt=fmt, contigs=contigs)
+
+    proc = subprocess.run(
+        [shutil.which("yahs"), "-o", str(tmp_path / f"yahs_{fmt}"), str(ref),
+         str(tmp_path / f"out.{fmt}")],
+        capture_output=True, text=True, cwd=tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    dumped = re.search(r"dumped (\d+) read pairs from (\d+) records", proc.stderr)
+    assert dumped, proc.stderr
+    pairs, records = int(dumped.group(1)), int(dumped.group(2))
+    assert pairs == result.contacts_written > 500
+    assert records == len(rows) == (2 * pairs if fmt == "bed" else pairs)
+    assert (tmp_path / f"yahs_{fmt}_scaffolds_final.agp").exists()
+    assert (tmp_path / f"yahs_{fmt}_scaffolds_final.fa").exists()
