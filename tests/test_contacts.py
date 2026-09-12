@@ -567,8 +567,7 @@ def test_cli_infers_bed_from_the_output_name(tmp_path):
     ("x.pa5", None, "pa5"),
     ("x.pa5.gz", None, "pa5"),
     ("x.bed.gz", None, "bed"),
-    ("x.txt", None, "pa5"),          # no known extension: PA5 as before
-    ("x.txt", "bed", "bed"),
+    ("x.txt", "bed", "bed"),         # any name goes with an explicit format
     ("x.pa5", "bed", "bed"),         # explicit wins, with a warning
     ("x.bed", "PA5", "pa5"),
 ])
@@ -592,6 +591,26 @@ def test_cli_format_option_and_inference(tmp_path, output, flag, expected):
         assert "yahs will read it as" in proc.stderr
     else:
         assert "Warning" not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("output", ["contacts.txt", "contacts.tsv", "contacts", "contacts.gz"])
+def test_cli_does_not_guess_the_format_of_an_unknown_name(tmp_path, output):
+    """No --format and no .bed/.pa5: a usage error, not a silently chosen PA5.
+
+    yahs stops on such a name as well (yahs.c: "unknown link file format")
+    unless given --file-type, so a guessed format would fail one step later.
+    """
+    sam = tmp_path / "in.sam"
+    write_sam(sam, [(seg("r", k), 0, "ctg1", 100 * k, 60, "50M") for k in (1, 2)])
+    out = tmp_path / output
+    proc = subprocess.run(
+        [sys.executable, "-m", "cifi.cli", "contacts", str(sam), "-o", str(out),
+         "--no-report", "--quiet"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "--format" in proc.stderr and ".bed" in proc.stderr and ".pa5" in proc.stderr
+    assert [p.name for p in tmp_path.iterdir()] == ["in.sam"], "nothing was written"
 
 
 # --- atomic output ----------------------------------------------------------

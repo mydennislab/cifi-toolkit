@@ -329,8 +329,8 @@ of the two text formats it reads:
   consecutive lines per contact, each carrying the actual aligned span of one
   segment. YaHS normalises coverage from those spans and needs no read
   length. This is the format to scaffold CiFi data with.
-* **PA5** (`--format pa5`, `.pa5`/`.pa5.gz`, and the default for any other
-  name): one line per contact with the alignment midpoints. YaHS rebuilds an
+* **PA5** (`--format pa5`, or an output name ending in `.pa5`/`.pa5.gz`):
+  one line per contact with the alignment midpoints. YaHS rebuilds an
   interval around each midpoint from a single global `--read-length`, which
   fits fixed-length Hi-C reads but not CiFi segments.
 
@@ -355,9 +355,11 @@ sample_contacts_report.html
 
 The same command with `-o sample.pa5` (or `--format pa5`) writes PA5, exactly
 as before; `--format` overrides the extension, with a warning, since YaHS
-picks its parser by extension unless given `--file-type`. The output takes
-its final name only once it is complete: a run that fails leaves no partial
-`.bed` or `.pa5` behind, and an earlier file of that name is left untouched.
+picks its parser by extension unless given `--file-type`. An output name with
+neither extension needs `--format`: rather than guess, the command stops with
+a usage error, as YaHS itself would on that name. The output takes its final
+name only once it is complete: a run that fails leaves no partial `.bed` or
+`.pa5` behind, and an earlier file of that name is left untouched.
 
 The BAM must be **grouped by read name** (`samtools sort -n`). A header that
 declares coordinate order is refused with a message saying so; a header
@@ -368,7 +370,8 @@ Processing is streaming: memory holds the segments of one read at a time.
 Options:
 
 ```text
---format        bed or pa5; taken from the output name when omitted
+--format        bed or pa5; taken from the output name when omitted,
+                required for any other name
 -q, --mapq      minimum MAPQ for a segment to take part      [default: 1]
 -t, --threads   BAM decompression threads                     [default: 4]
 --no-json       skip the statistics file

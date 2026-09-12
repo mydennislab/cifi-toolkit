@@ -933,8 +933,8 @@ def _strip_contacts_suffix(path):
               help="Output contacts file (.gz to compress)")
 @click.option("--format", "output_format",
               type=click.Choice(CONTACTS_FORMATS, case_sensitive=False), default=None,
-              help="Output format; taken from the output name (.bed or .pa5) when "
-                   "omitted, pa5 for any other name")
+              help="Output format; taken from the output name (.bed or .pa5, .gz "
+                   "allowed) when omitted, required for any other name")
 @click.option("-q", "--mapq", default=1, show_default=True,
               help="Minimum MAPQ for a segment to take part in contacts")
 @click.option("-t", "--threads", default=4, show_default=True,
@@ -977,7 +977,16 @@ def contacts_cmd(input_bam, output, output_format, mapq, threads, report, write_
     from . import reconstruct_contacts
 
     named_format = _contacts_format_from_name(output)
-    output_format = (output_format or named_format or "pa5").lower()
+    if output_format is None:
+        if named_format is None:
+            # yahs picks its parser by the same extensions and stops on any
+            # other name unless told --file-type (yahs.c, "unknown link file
+            # format"); a guessed format here would only fail there.
+            raise click.UsageError(
+                f"cannot tell the output format from '{output}'; name it .bed or "
+                ".pa5 (.gz allowed), as yahs expects, or pass --format")
+        output_format = named_format
+    output_format = output_format.lower()
     if named_format and named_format != output_format:
         # yahs picks the parser by extension unless told --file-type
         click.echo(f"Warning: writing {output_format.upper()} to a file named "
