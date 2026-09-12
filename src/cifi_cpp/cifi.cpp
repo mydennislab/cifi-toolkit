@@ -188,18 +188,16 @@ SingleEnzymeQCResult run_qc_analysis_custom(
 
     // Process input file
     if (is_bam_file(input_path)) {
-        htsFile *fp = hts_open(input_path.c_str(), "r");
+        cifi::HtsFilePtr fp(hts_open(input_path.c_str(), "r"));
         if (!fp) throw std::runtime_error("Cannot open: " + input_path);
 
-        sam_hdr_t *hdr = sam_hdr_read(fp);
-        if (!hdr) {
-            hts_close(fp);
-            throw std::runtime_error("Cannot read header: " + input_path);
-        }
+        cifi::SamHeaderPtr hdr(sam_hdr_read(fp.get()));
+        if (!hdr) throw std::runtime_error("Cannot read header: " + input_path);
 
-        bam1_t *b = bam_init1();
+        cifi::BamRecordPtr rec(bam_init1());
+        bam1_t *b = rec.get();
 
-        while (sam_read1(fp, hdr, b) >= 0 && (num_reads == 0 || result.reads_analyzed < static_cast<uint64_t>(num_reads))) {
+        while (sam_read1(fp.get(), hdr.get(), b) >= 0 && (num_reads == 0 || result.reads_analyzed < static_cast<uint64_t>(num_reads))) {
             if (b->core.flag & (BAM_FSECONDARY | BAM_FSUPPLEMENTARY)) continue;
 
             std::string sequence;
@@ -215,10 +213,6 @@ SingleEnzymeQCResult run_qc_analysis_custom(
 
             process_sequence(sequence);
         }
-
-        bam_destroy1(b);
-        sam_hdr_destroy(hdr);
-        hts_close(fp);
     } else {
         gzFile fp = gzopen(input_path.c_str(), "r");
         if (!fp) throw std::runtime_error("Cannot open: " + input_path);
