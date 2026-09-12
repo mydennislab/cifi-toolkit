@@ -62,11 +62,16 @@ private:
 std::unique_ptr<FastqWriter> make_writer(const std::string& path, bool force_gzip);
 
 /**
- * Buffered writer for line-oriented text (the PA5 contacts file), gzip
+ * Buffered writer for line-oriented text (the contacts file), gzip
  * compressed when the path ends in .gz.
  *
  * Lines are collected into a block before they reach the file, so writing a
  * contact costs an append rather than a syscall or a deflate call each.
+ *
+ * The file is written under a temporary name beside the requested one and
+ * renamed to it by close(). A run that throws, or ends without close(),
+ * removes the temporary instead, so a pipeline never finds a truncated file
+ * under the name it asked for.
  */
 class TextWriter {
 public:
@@ -74,12 +79,14 @@ public:
     ~TextWriter();
 
     void write(const std::string& line);  // line carries its own newline
-    void close();
+    void close();                          // flush, then move into place
 
 private:
     void flush();
+    void discard();
 
     std::string path_;
+    std::string tmp_path_;   // empty once the file is in place or discarded
     std::ofstream out_;
     gzFile gz_ = nullptr;
     std::string buf_;

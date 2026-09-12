@@ -580,6 +580,63 @@ def test_cli_format_option_and_inference(tmp_path, output, flag, expected):
         assert "Warning" not in proc.stderr, proc.stderr
 
 
+# --- atomic output ----------------------------------------------------------
+
+# Read r is complete and flushed (its contact written) when the error comes.
+BAD_NAME = [
+    (seg("r", 1), 0, "ctg1", 100, 60, "50M"),
+    (seg("r", 2), 0, "ctg1", 900, 60, "50M"),
+    (seg("s", 1), 0, "ctg1", 100, 60, "50M"),
+    ("m84039/1/ccs", 0, "ctg1", 100, 60, "50M"),   # outside the naming contract
+]
+REGROUPED = [
+    (seg("a", 1), 0, "ctg1", 100, 60, "50M"),
+    (seg("a", 2), 0, "ctg1", 900, 60, "50M"),
+    (seg("b", 1), 0, "ctg1", 100, 60, "50M"),
+    (seg("a", 3), 0, "ctg1", 1700, 60, "50M"),    # a comes back after its group
+]
+# Three reads of 150 segments: 33,525 contacts, more than the writer's 1 MB
+# block, so records have reached the disk before the bad name arrives.
+MANY_THEN_BAD = [(seg(f"big{r}", k), 0, "ctg1", 1 + 10 * k, 60, "50M")
+                 for r in range(3) for k in range(1, 151)]
+MANY_THEN_BAD.append(("m84039/1/ccs", 0, "ctg1", 100, 60, "50M"))
+
+
+def test_the_large_case_flushes_before_the_error(tmp_path):
+    rows, _ = run_contacts(tmp_path, MANY_THEN_BAD[:-1])
+    assert len(rows) == 3 * 150 * 149 // 2
+    assert (tmp_path / "out.pa5").stat().st_size > 1 << 20
+
+
+@pytest.mark.parametrize("records", [BAD_NAME, REGROUPED, MANY_THEN_BAD],
+                         ids=["bad_name", "regrouped", "flushed_then_bad"])
+@pytest.mark.parametrize("output", ["out.pa5", "out.pa5.gz", "out.bed", "out.bed.gz"])
+def test_a_failed_run_leaves_no_output_file(tmp_path, records, output):
+    """Contacts were written before the error; none of them may surface."""
+    fmt = "bed" if ".bed" in output else "pa5"
+    with pytest.raises((RuntimeError, ValueError)):
+        run_contacts(tmp_path, records, fmt=fmt, output=output, sort_order=None)
+
+    assert not (tmp_path / output).exists()
+    assert [p.name for p in tmp_path.iterdir()] == ["in.sam"], "no temporary left behind"
+
+
+def test_a_completed_run_leaves_only_the_output(tmp_path):
+    records = [(seg("r", k), 0, "ctg1", 100 * k, 60, "50M") for k in (1, 2)]
+    run_contacts(tmp_path, records, fmt="bed")
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["in.sam", "out.bed"]
+
+
+def test_a_failed_run_keeps_the_previous_output(tmp_path):
+    out = tmp_path / "out.pa5"
+    out.write_text("previous\n")
+    with pytest.raises((RuntimeError, ValueError)):
+        run_contacts(tmp_path, BAD_NAME)
+
+    assert out.read_text() == "previous\n"
+
+
 # --- yahs end to end --------------------------------------------------------
 
 def write_reference(path, contigs, rng, width=60):

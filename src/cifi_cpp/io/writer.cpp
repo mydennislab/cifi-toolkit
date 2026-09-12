@@ -1,4 +1,7 @@
 #include "writer.hpp"
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <algorithm>
 #include <limits>
@@ -139,28 +142,30 @@ std::unique_ptr<FastqWriter> make_writer(const std::string& path, bool force_gzi
 
 static const size_t TEXT_WRITER_BLOCK = 1 << 20;
 
-TextWriter::TextWriter(const std::string& path) : path_(path) {
+TextWriter::TextWriter(const std::string& path)
+    : path_(path), tmp_path_(path + ".tmp") {
+    // A sibling of the final path: rename() only replaces atomically within
+    // one filesystem. Compression follows the final name, as before.
     if (ends_with_gz(path)) {
-        gz_ = gzopen(path.c_str(), "wb");
+        gz_ = gzopen(tmp_path_.c_str(), "wb");
         if (!gz_) {
-            throw std::runtime_error("Cannot open for gzip writing: " + path);
+            throw std::runtime_error("Cannot open for gzip writing: " + tmp_path_);
         }
     } else {
-        out_.open(path);
+        out_.open(tmp_path_);
         if (!out_) {
-            throw std::runtime_error("Cannot open for writing: " + path);
+            throw std::runtime_error("Cannot open for writing: " + tmp_path_);
         }
     }
     buf_.reserve(TEXT_WRITER_BLOCK + 4096);
 }
 
 TextWriter::~TextWriter() {
-    // As for the FASTQ writers: close() throws on a failed flush, which must
-    // not escape a destructor. Callers close() explicitly to see the error.
-    try {
-        close();
-    } catch (...) {
-    }
+    // Reaching the destructor with the temporary still present means the
+    // caller never got to close(): an exception is unwinding through it.
+    // The partial file must not be promoted, so it is dropped here rather
+    // than completed. Nothing here throws.
+    discard();
 }
 
 void TextWriter::write(const std::string& line) {
@@ -189,21 +194,45 @@ void TextWriter::flush() {
     buf_.clear();
 }
 
-void TextWriter::close() {
+void TextWriter::discard() {
     if (gz_) {
-        flush();
-        int rc = gzclose(gz_);
+        gzclose(gz_);
         gz_ = nullptr;
-        if (rc != Z_OK) {
-            throw std::runtime_error("Failed closing " + path_ + " (zlib code " +
-                                     std::to_string(rc) + ")");
+    }
+    if (out_.is_open()) out_.close();
+    if (!tmp_path_.empty()) {
+        std::remove(tmp_path_.c_str());
+        tmp_path_.clear();
+    }
+}
+
+void TextWriter::close() {
+    if (tmp_path_.empty()) return;  // already in place, or discarded
+    try {
+        if (gz_) {
+            flush();
+            int rc = gzclose(gz_);
+            gz_ = nullptr;
+            if (rc != Z_OK) {
+                throw std::runtime_error("Failed closing " + path_ + " (zlib code " +
+                                         std::to_string(rc) + ")");
+            }
+        } else if (out_.is_open()) {
+            flush();
+            out_.close();
+            if (out_.fail()) {
+                throw std::runtime_error("Failed closing " + path_);
+            }
         }
-    } else if (out_.is_open()) {
-        flush();
-        out_.close();
-        if (out_.fail()) {
-            throw std::runtime_error("Failed closing " + path_);
+        // The final flush succeeded; only now does the file take its name.
+        if (std::rename(tmp_path_.c_str(), path_.c_str()) != 0) {
+            throw std::runtime_error("Cannot move " + tmp_path_ + " to " + path_ + ": " +
+                                     std::strerror(errno));
         }
+        tmp_path_.clear();
+    } catch (...) {
+        discard();
+        throw;
     }
 }
 
