@@ -63,3 +63,54 @@ def test_digest_matches_pre_change_fixture(tmp_path, prefix, opts):
     assert _comparable(produced) == _comparable(expected)
     assert "segments_written" not in produced["results"]
     assert "segments" not in produced["output"]
+    assert "command" not in produced and "formats" not in produced
+
+
+def _md5(path):
+    import hashlib
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("prefix,opts", _option_sets())
+def test_segments_table_leaves_every_other_output_byte_identical(tmp_path, prefix, opts):
+    """The fixture digest, with and without --segments-table: same R1, R2, segments."""
+    shutil.copy(DIGEST / "input.fastq", tmp_path / "input.fastq")
+    runs = {}
+    for tag, extra in (("plain", []),
+                       ("table", ["--segments-table", str(tmp_path / f"{prefix}.segments.tsv.gz")])):
+        work = tmp_path / tag
+        work.mkdir()
+        proc = subprocess.run(
+            [sys.executable, "-m", "cifi.cli", "digest", str(tmp_path / "input.fastq"),
+             "-o", str(work / prefix), "--no-report",
+             "--segments-out", str(work / f"{prefix}.segments.fastq"), *opts, *extra],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        outputs = sorted(p.name for p in work.iterdir())
+        runs[tag] = {name: _md5(work / name) for name in outputs}
+
+    fastq = [n for n in runs["plain"] if n.endswith((".fastq", ".fastq.gz"))]
+    assert len(fastq) == 3, runs["plain"]
+    for name in fastq:
+        assert runs["plain"][name] == runs["table"][name], name
+    # the stats file differs only by the keys that describe the new output
+    # and its provenance (the command line and the table format)
+    plain = json.loads((tmp_path / "plain" / f"{prefix}_stats.json").read_text())
+    table = json.loads((tmp_path / "table" / f"{prefix}_stats.json").read_text())
+    assert "command" not in plain and "formats" not in plain
+    assert table.pop("command").startswith("cifi digest ")
+    assert table.pop("formats") == {"segments_table": {"name": "segments", "version": 1}}
+    table["results"].pop("segments_table_rows")
+    table["output"].pop("segments_table")
+    table["parameters"].pop("segments_table")
+    for stats in (plain, table):
+        stats["parameters"].pop("segments_out")   # a path, different per run
+    assert _comparable(plain) == _comparable(table)
+    assert plain["output"].keys() == table["output"].keys()
+    # the fixture itself is still reproduced
+    for mate in ("R1", "R2"):
+        produced = tmp_path / "table" / f"{prefix}_{mate}.fastq"
+        if not produced.exists():
+            produced = tmp_path / "table" / f"{prefix}_{mate}.fastq.gz"
+        assert _read_text(produced) == (DIGEST / f"{prefix}_{mate}.fastq").read_text(), mate

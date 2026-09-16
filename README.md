@@ -33,6 +33,10 @@ CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. 
   * [Alignment filtering](#alignment-filtering)
   * [Output formats: BED and PA5](#output-formats-bed-and-pa5)
   * [Checking the two routes against each other](#checking-the-two-routes-against-each-other)
+* [Molecule tables](#molecule-tables)
+
+  * [Two indices](#two-indices)
+  * [The segments table](#the-segments-table)
 * [Digest behavior and options](#digest-behavior-and-options)
 
   * [Minimum number of segments](#minimum-number-of-segments)
@@ -56,15 +60,15 @@ CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. 
 
 Unlike conventional paired-end Hi-C, a CiFi read can contain **multiple interacting genomic segments in one long PacBio HiFi read**.
 
-`cifi-toolkit` provides five main functions:
+`cifi-toolkit` provides these functions:
 
-| Command         | Purpose                                                                 |
-| --------------- | ----------------------------------------------------------------------- |
-| `cifi qc`       | Characterize CiFi reads and estimate digestion/contact yield            |
-| `cifi digest`   | Digest CiFi reads in silico; paired-end contacts and/or unique segments |
-| `cifi contacts` | Reconstruct pairwise contacts from mapped unique segments (YaHS BED/PA5) |
-| `cifi filter`   | Filter aligned paired contacts by mapping status and MAPQ               |
-| `cifi enzymes`  | List built-in restriction enzymes and cut positions                     |
+| Command           | Purpose                                                                 |
+| ----------------- | ----------------------------------------------------------------------- |
+| `cifi qc`         | Characterize CiFi reads and estimate digestion/contact yield            |
+| `cifi digest`     | Digest CiFi reads in silico; paired-end contacts, unique segments and the segments table |
+| `cifi contacts`   | Reconstruct pairwise contacts from mapped unique segments (YaHS BED/PA5) |
+| `cifi filter`     | Filter aligned paired contacts by mapping status and MAPQ               |
+| `cifi enzymes`    | List built-in restriction enzymes and cut positions                     |
 
 A typical analysis looks like:
 
@@ -315,6 +319,29 @@ The segments file is gzip-compressed when its name ends in `.gz` and plain
 otherwise; `--gzip` only concerns R1/R2. The R1/R2 output, statistics and
 report are the same with or without the option. See
 [Unique segments and `cifi contacts`](#unique-segments-and-cifi-contacts).
+
+A further optional output describes the molecules rather than the
+contacts (see [Molecule tables](#molecule-tables)):
+
+```bash
+cifi digest reads.bam \
+    -e HindIII \
+    -o sample \
+    --segments-out sample.segments.fastq.gz \
+    --segments-table sample.segments.tsv.gz
+```
+
+* `--segments-table PATH`: one row per retained segment (bgzip TSV) with the
+  cut span it came from, its rank among the kept segments, the read's
+  length and its coordinates in the read. Works with or without
+  `--segments-out`; when both are given the rows and the FASTQ records
+  correspond one to one.
+
+The option changes neither R1/R2, the segments FASTQ, the report nor the
+existing keys of the statistics file; it adds its own keys under
+`parameters`, `results` and `output` when used, plus `command` (the command
+line) and `formats` (the name and layout version of the table written) at
+the top level.
 
 ---
 
@@ -744,6 +771,95 @@ reports peak memory.
 
 ---
 
+# Molecule tables
+
+A CiFi read is one HiFi concatemer of restriction-defined segments: an
+ordered, multi-way contact molecule. The pairs of `cifi digest` and the
+contacts of `cifi contacts` reduce it to pairwise relations; the segments
+table described here keeps the molecule whole, as a data file: which
+segments it had in which order, which cut spans were dropped and where each
+segment sat in the read. It is a bgzip-compressed TSV file (readable with
+any gzip reader, and block-addressable by htslib).
+
+The header layout is `##key=value` metadata lines, one item each, in a
+fixed order, then the `#columns:` line naming the columns, then the data
+rows. The vocabulary is fixed and given below; a reader splits each `##`
+line on its first `=`. The first four keys are `cifi_format`, naming the
+format, `format_version`, its layout version (`1`), `tool_version`, the
+cifi release, and `command`, the command line that wrote the file. The
+remaining keys state the conventions of the columns (coordinate systems,
+index meanings, the codes of a column). Nothing in the header varies
+between two runs of the same command: no timestamp, no host.
+
+`cifi digest`'s statistics file repeats the provenance: it carries
+`formats`, keyed by output (`segments_table`), and gains `command` only when
+the table was requested; the file is otherwise unchanged.
+
+## Two indices
+
+Two indices describe a segment's place in its molecule, and they are never
+overloaded:
+
+| Index            | Meaning                                                                                          |
+| ---------------- | ------------------------------------------------------------------------------------------------ |
+| `span_index`     | The 1-based index of the cut span the segment came from. Dropped spans leave gaps. This is the `k` of the segment name `<read>__CIFI_SEG__<k>`: digest provenance. |
+| `retained_index` | The dense 1..N order of the segment among the emitted segments of its molecule: within-molecule order for algorithms. |
+
+A read cut into four spans whose second span was too short has segments with
+`span_index` 1, 3, 4 and `retained_index` 1, 2, 3.
+
+## The segments table
+
+`cifi digest --segments-table PATH` writes one row per retained segment, in
+read order, in the same order as `--segments-out` writes the FASTQ records.
+
+Header:
+
+```text
+##cifi_format=segments
+##format_version=1
+##tool_version=<cifi version>
+##command=<command line>
+##read_coordinates=0-based-half-open
+##span_index=1-based-original-digest-span
+##retained_index=1-based-dense-retained-order
+##terminal=T5,T3,I,T5T3
+#columns: <the columns below>
+```
+
+Columns:
+
+```text
+molecule_id  span_index  retained_index  segments_kept  spans_total  read_length
+read_start  read_end  span_start  span_end  original_len  processed_len  trimmed_5p
+terminal  enzyme  cut_offset
+```
+
+* `molecule_id`: the read name (no `__CIFI_SEG__` suffix).
+* `span_index`, `retained_index`: as above. `segments_kept`: the number of
+  retained segments of the molecule (the largest `retained_index`).
+  `spans_total`: the number of cut spans of the read, sites + 1, empty spans
+  included (the largest possible `span_index`).
+* `read_length`: the length of the whole read, repeated on each of its
+  rows; with `read_start` and `read_end` it places the segment in the read
+  the way a PAF of the molecule would.
+* `read_start`, `read_end`: 0-based, half-open coordinates of the emitted
+  (post-trim) segment in the original read; `read[read_start:read_end]` is
+  the FASTQ record's sequence. `span_start`, `span_end`: the cut span before
+  the 5' site-remnant trim. `original_len = span_end - span_start`,
+  `processed_len = read_end - read_start`, `trimmed_5p = read_start -
+  span_start` (0 for the read's leading span, which begins at no cut, and
+  with `--no-strip-overhang`).
+* `terminal`: `T5` for `span_index` 1, `T3` for `span_index == spans_total`,
+  `I` otherwise. A read of a single span (possible with `-m 1`) is `T5T3`.
+* `enzyme`: the enzyme name, or the site itself for `--site`; `cut_offset`:
+  the cut position used.
+
+`--gzip` does not change the table; it is always bgzip. Reads that failed
+`--min-segments` have no rows.
+
+---
+
 # Digest behavior and options
 
 ## Minimum number of segments
@@ -1119,6 +1235,11 @@ A CiFi read containing multiple segments therefore represents multiple pairwise 
 A retained segment written once by `cifi digest --segments-out`, named
 `<read>__CIFI_SEG__<k>`, from whose alignment `cifi contacts` rebuilds the
 read's contacts.
+
+### Molecule
+
+The CiFi read seen as an ordered set of segments: what the segments table
+describes.
 
 ---
 

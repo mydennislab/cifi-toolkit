@@ -151,7 +151,7 @@ static const size_t TEXT_WRITER_BLOCK = 1 << 20;
 // mixture; O_EXCL cannot hand the same name to both. The descriptor is
 // closed again because the writer opens the name through the stream or
 // zlib; the file stays claimed either way, with the usual permissions.
-static std::string claim_temp_name(const std::string& path) {
+std::string claim_temp_name(const std::string& path) {
     static const char alnum[] =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     std::random_device rd;

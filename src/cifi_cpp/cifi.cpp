@@ -23,6 +23,7 @@
 #include "stats/statistics.hpp"
 #include "io/hts_handles.hpp"
 #include "io/writer.hpp"
+#include "io/table_writer.hpp"
 #include "filter/bam_filter.hpp"
 #include "contacts/contacts.hpp"
 
@@ -287,13 +288,19 @@ SingleEnzymeQCResult run_qc_analysis_custom(
 // Read Processing
 // ============================================================================
 
+// The optional side outputs of a digest, all off by default
+struct DigestSideOutputs {
+    cifi::FastqWriter* segments = nullptr;   // each retained segment once
+    cifi::TableWriter* table = nullptr;      // the segments table
+};
+
 // Helper: read BAM sequence into a read for processing
 static void process_bam_reads(
     const std::string& input_path,
     const cifi::ProcessingConfig& config,
     cifi::FastqWriter& writer_r1,
     cifi::FastqWriter& writer_r2,
-    cifi::FastqWriter* writer_segments,
+    const DigestSideOutputs& side,
     cifi::ProcessingResult& result
 ) {
     // Owning handles: process_single_read throws on a read name that
@@ -343,7 +350,7 @@ static void process_bam_reads(
         }
 
         cifi::process_single_read(name, sequence, quality, config,
-                                  writer_r1, writer_r2, result, writer_segments);
+                                  writer_r1, writer_r2, result, side.segments, side.table);
     }
 }
 
@@ -353,7 +360,7 @@ static void process_fastq_reads(
     const cifi::ProcessingConfig& config,
     cifi::FastqWriter& writer_r1,
     cifi::FastqWriter& writer_r2,
-    cifi::FastqWriter* writer_segments,
+    const DigestSideOutputs& side,
     cifi::ProcessingResult& result
 ) {
     gzFile fp = gzopen(input_path.c_str(), "r");
@@ -368,7 +375,7 @@ static void process_fastq_reads(
                                         : std::string(seq->seq.l, 'I'));
 
         cifi::process_single_read(name, sequence, quality, config,
-                                  writer_r1, writer_r2, result, writer_segments);
+                                  writer_r1, writer_r2, result, side.segments, side.table);
     }
 
     kseq_destroy(seq);
@@ -386,33 +393,48 @@ static void close_all(std::initializer_list<cifi::FastqWriter*> writers) {
     if (err) std::rethrow_exception(err);
 }
 
-// Digest one input into R1/R2 and, when segments_out is non-empty, the
-// unique-segment FASTQ (gzip decided by its extension, as for any writer).
+// Digest one input into R1/R2 and, for each non-empty path, the
+// unique-segment FASTQ (gzip decided by its extension, as for any writer)
+// and the segments table (bgzip). command and version go into the table
+// header.
 static cifi::ProcessingResult digest_file(
     const std::string& input_path,
     const std::string& output_r1,
     const std::string& output_r2,
     const std::string& segments_out,
+    const std::string& segments_table,
+    const std::string& command,
+    const std::string& version,
     const cifi::ProcessingConfig& config,
     bool gzip_output
 ) {
+    bool bam = is_bam_file(input_path);
     cifi::ProcessingResult result(config.fast_mode);
     auto writer_r1 = cifi::make_writer(output_r1, gzip_output);
     auto writer_r2 = cifi::make_writer(output_r2, gzip_output);
+    DigestSideOutputs side;
     std::unique_ptr<cifi::FastqWriter> writer_segments;
     if (!segments_out.empty()) {
         writer_segments = cifi::make_writer(segments_out, false);
+        side.segments = writer_segments.get();
+    }
+    std::unique_ptr<cifi::TableWriter> writer_table;
+    if (!segments_table.empty()) {
+        writer_table = std::make_unique<cifi::TableWriter>(segments_table);
+        writer_table->header(cifi::segments_table_header(command, version));
+        side.table = writer_table.get();
     }
 
-    if (is_bam_file(input_path)) {
-        process_bam_reads(input_path, config, *writer_r1, *writer_r2,
-                          writer_segments.get(), result);
+    if (bam) {
+        process_bam_reads(input_path, config, *writer_r1, *writer_r2, side, result);
     } else {
-        process_fastq_reads(input_path, config, *writer_r1, *writer_r2,
-                            writer_segments.get(), result);
+        process_fastq_reads(input_path, config, *writer_r1, *writer_r2, side, result);
     }
 
+    // The table completes only after the FASTQs did: a flush error on one
+    // of those leaves the run failed with no table under its name.
     close_all({writer_r1.get(), writer_r2.get(), writer_segments.get()});
+    if (writer_table) writer_table->close();
     return result;
 }
 
@@ -428,7 +450,10 @@ cifi::ProcessingResult process_reads(
     bool gzip_output = false,
     bool fast_mode = false,
     bool revcomp_r2 = false,
-    const std::string& segments_out = ""
+    const std::string& segments_out = "",
+    const std::string& segments_table = "",
+    const std::string& command = "",
+    const std::string& version = ""
 ) {
     auto enzyme_opt = cifi::get_enzyme(enzyme_name);
     if (!enzyme_opt) {
@@ -443,7 +468,8 @@ cifi::ProcessingResult process_reads(
     config.revcomp_r2 = revcomp_r2;
     config.fast_mode = fast_mode;
 
-    return digest_file(input_path, output_r1, output_r2, segments_out, config, gzip_output);
+    return digest_file(input_path, output_r1, output_r2, segments_out, segments_table,
+                       command, version, config, gzip_output);
 }
 
 // Process reads with a custom enzyme site
@@ -459,7 +485,10 @@ cifi::ProcessingResult process_reads_custom(
     bool gzip_output = false,
     bool fast_mode = false,
     bool revcomp_r2 = false,
-    const std::string& segments_out = ""
+    const std::string& segments_out = "",
+    const std::string& segments_table = "",
+    const std::string& command = "",
+    const std::string& version = ""
 ) {
     if (site.empty()) {
         throw std::runtime_error("Custom site must not be empty");
@@ -480,7 +509,8 @@ cifi::ProcessingResult process_reads_custom(
     config.revcomp_r2 = revcomp_r2;
     config.fast_mode = fast_mode;
 
-    return digest_file(input_path, output_r1, output_r2, segments_out, config, gzip_output);
+    return digest_file(input_path, output_r1, output_r2, segments_out, segments_table,
+                       command, version, config, gzip_output);
 }
 
 // Contacts from mapped unique segments
@@ -553,7 +583,9 @@ NB_MODULE(_core, m) {
         .def_ro("bases_trimmed_overhang", &cifi::ProcessingResult::bases_trimmed_overhang)
         .def_ro("bases_in_filtered_reads", &cifi::ProcessingResult::bases_in_filtered_reads)
         .def_ro("segments_per_read_stats", &cifi::ProcessingResult::segments_per_read_stats)
-        .def_ro("pairs_per_read_stats", &cifi::ProcessingResult::pairs_per_read_stats);
+        .def_ro("pairs_per_read_stats", &cifi::ProcessingResult::pairs_per_read_stats)
+        // side table
+        .def_ro("segments_table_rows", &cifi::ProcessingResult::segments_table_rows);
 
     // SingleEnzymeQCResult
     nb::class_<SingleEnzymeQCResult>(m, "SingleEnzymeQCResult")
@@ -611,10 +643,15 @@ NB_MODULE(_core, m) {
           nb::arg("fast_mode") = false,
           nb::arg("revcomp_r2") = false,
           nb::arg("segments_out") = "",
+          nb::arg("segments_table") = "",
+          nb::arg("command") = "",
+          nb::arg("version") = "",
           "Process FASTQ or BAM file, generating ALL pairwise contacts (n choose 2).\n"
           "Mates share a read name; min_segment_len bounds the emitted read length.\n"
           "R2 keeps native orientation unless revcomp_r2 is set.\n"
-          "segments_out: optional FASTQ (.gz for gzip) receiving each retained segment once.");
+          "segments_out: optional FASTQ (.gz for gzip) receiving each retained segment once.\n"
+          "segments_table: optional bgzip TSV with one row per retained segment.\n"
+          "command, version: recorded in the table header.");
 
     m.def("process_reads_custom", &process_reads_custom,
           nb::arg("input_path"),
@@ -629,10 +666,15 @@ NB_MODULE(_core, m) {
           nb::arg("fast_mode") = false,
           nb::arg("revcomp_r2") = false,
           nb::arg("segments_out") = "",
+          nb::arg("segments_table") = "",
+          nb::arg("command") = "",
+          nb::arg("version") = "",
           "Process FASTQ or BAM file with custom enzyme site.\n"
           "Mates share a read name; min_segment_len bounds the emitted read length.\n"
           "R2 keeps native orientation unless revcomp_r2 is set.\n"
-          "segments_out: optional FASTQ (.gz for gzip) receiving each retained segment once.");
+          "segments_out: optional FASTQ (.gz for gzip) receiving each retained segment once.\n"
+          "segments_table: optional bgzip TSV with one row per retained segment.\n"
+          "command, version: recorded in the table header.");
 
     // Segment naming contract (see core/segment_name.hpp)
     m.def("segment_name", &cifi::segment_name,
@@ -730,4 +772,5 @@ NB_MODULE(_core, m) {
           nb::arg("pos0"), nb::arg("end0"),
           "PA5 position for an alignment spanning [pos0, end0) in 0-based\n"
           "coordinates: the midpoint yahs computes for a name-sorted BAM.");
+
 }

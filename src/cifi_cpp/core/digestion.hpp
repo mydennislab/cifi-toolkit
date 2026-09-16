@@ -3,6 +3,8 @@
 #include "enzyme.hpp"
 #include "../stats/statistics.hpp"
 #include "../io/writer.hpp"
+#include "../io/table_writer.hpp"
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <memory>
@@ -30,6 +32,12 @@ struct SegmentExtraction {
     // 1-based index of the cut-delimited span each kept segment came from,
     // parallel to segments. Dropped spans leave gaps; see segment_name.hpp.
     std::vector<uint32_t> span_index;
+    // The cut span each kept segment came from, before the 5' trim; parallel
+    // to segments. segments[i] lies inside spans[i].
+    std::vector<std::pair<size_t, size_t>> spans;
+    // Cut spans in the read, sites + 1, empty ones included: the range of
+    // span_index.
+    uint32_t spans_total = 0;
     uint64_t dropped_short = 0;   // non-empty spans below min_emit_len after trimming
     uint64_t bases_dropped = 0;   // bases in those spans, post-trim
     uint64_t bases_trimmed = 0;   // bases removed by the 5' site-remnant trim
@@ -59,6 +67,8 @@ struct ProcessingResult {
     // Bases in reads that no segment survived from, so that
     // kept + trimmed + dropped + this == total_bases_in
     uint64_t bases_in_filtered_reads = 0;
+    // Rows of the segments table; 0 when no table writer is given
+    uint64_t segments_table_rows = 0;
 
     // Filtering reason counters
     uint64_t filtered_few_sites = 0;    // Reads with < min_segments sites
@@ -80,12 +90,21 @@ struct ProcessingResult {
 };
 
 /**
+ * Header lines of the segments table (see segments_table_row): the
+ * ##key=value metadata, then the #columns line.
+ */
+std::vector<std::string> segments_table_header(const std::string& command,
+                                               const std::string& version);
+
+/**
  * Process a single read: digest and write all pairwise contacts.
  * Returns true if read passed filters and was processed.
  *
  * When out_segments is given, each retained segment of a passing read is
  * also written once, in read order and native orientation, named per
- * segment_name.hpp. The R1/R2 output is the same either way.
+ * segment_name.hpp. When out_table is given, the same segments get one row
+ * each in the segments table, in the same order. The R1/R2 output is the
+ * same whatever is given.
  */
 bool process_single_read(
     const std::string& name,
@@ -95,7 +114,8 @@ bool process_single_read(
     FastqWriter& out_r1,
     FastqWriter& out_r2,
     ProcessingResult& result,
-    FastqWriter* out_segments = nullptr
+    FastqWriter* out_segments = nullptr,
+    TableWriter* out_table = nullptr
 );
 
 /**

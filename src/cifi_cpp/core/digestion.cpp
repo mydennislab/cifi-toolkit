@@ -25,9 +25,11 @@ SegmentExtraction extract_segments(
     // segment that begins at a cut carries the site remnant; the read's
     // leading segment starts at position 0 and so keeps its full length.
     SegmentExtraction out;
+    out.spans_total = static_cast<uint32_t>(cuts.size() - 1);
     for (size_t i = 0; i < cuts.size() - 1; i++) {
         size_t start = cuts[i];
         size_t end = cuts[i + 1];
+        size_t span_start = start;
 
         // Span 0 runs from the read start and carries no remnant; every later
         // span begins at a cut, including one that falls at offset 0.
@@ -44,6 +46,7 @@ SegmentExtraction extract_segments(
         if (static_cast<int>(end - start) >= min_emit_len) {
             out.segments.push_back({start, end});
             out.span_index.push_back(static_cast<uint32_t>(i + 1));
+            out.spans.push_back({span_start, end});
         } else {
             out.dropped_short++;
             out.bases_dropped += end - start;
@@ -51,6 +54,70 @@ SegmentExtraction extract_segments(
     }
 
     return out;
+}
+
+static const char SEGMENTS_TABLE_COLUMNS[] =
+    "molecule_id\tspan_index\tretained_index\tsegments_kept\tspans_total\t"
+    "read_length\tread_start\tread_end\tspan_start\tspan_end\toriginal_len\t"
+    "processed_len\ttrimmed_5p\tterminal\tenzyme\tcut_offset";
+
+// The header is ##key=value metadata, one item per line, then the #columns
+// line; the vocabulary is fixed (README, "Molecule tables"). Nothing in it
+// varies between two runs of the same command.
+std::vector<std::string> segments_table_header(const std::string& command,
+                                               const std::string& version) {
+    return {
+        "##cifi_format=segments",
+        "##format_version=1",
+        "##tool_version=" + version,
+        "##command=" + command,
+        "##read_coordinates=0-based-half-open",
+        "##span_index=1-based-original-digest-span",
+        "##retained_index=1-based-dense-retained-order",
+        "##terminal=T5,T3,I,T5T3",
+        std::string("#columns: ") + SEGMENTS_TABLE_COLUMNS,
+    };
+}
+
+// One table row per retained segment. Two indices, never confused: span_index
+// is the cut span the segment came from (gaps where spans were dropped, the
+// same k as in the FASTQ name), retained_index its rank among the segments
+// kept (dense 1..N). read_length is the whole read, so the read coordinates
+// can be turned into PAF query coordinates of the molecule. terminal marks
+// the read ends by span: T5 for the first span, T3 for the last, I in
+// between; a read of one span is T5T3.
+static void write_segments_table_row(TableWriter& out, const std::string& name,
+                                     size_t read_length,
+                                     const SegmentExtraction& extraction, size_t i,
+                                     const EnzymeInfo& enzyme, std::string& line) {
+    const auto& [start, end] = extraction.segments[i];
+    const auto& [span_start, span_end] = extraction.spans[i];
+    uint32_t span_index = extraction.span_index[i];
+    const char* terminal = "I";
+    if (span_index == 1 && span_index == extraction.spans_total) terminal = "T5T3";
+    else if (span_index == 1) terminal = "T5";
+    else if (span_index == extraction.spans_total) terminal = "T3";
+
+    line.clear();
+    line += name;
+    line += '\t'; line += std::to_string(span_index);
+    line += '\t'; line += std::to_string(i + 1);
+    line += '\t'; line += std::to_string(extraction.segments.size());
+    line += '\t'; line += std::to_string(extraction.spans_total);
+    line += '\t'; line += std::to_string(read_length);
+    line += '\t'; line += std::to_string(start);
+    line += '\t'; line += std::to_string(end);
+    line += '\t'; line += std::to_string(span_start);
+    line += '\t'; line += std::to_string(span_end);
+    line += '\t'; line += std::to_string(span_end - span_start);
+    line += '\t'; line += std::to_string(end - start);
+    line += '\t'; line += std::to_string(start - span_start);
+    line += '\t'; line += terminal;
+    // a named enzyme by its name, a custom site by the site itself
+    line += '\t'; line += enzyme.name == "Custom" ? enzyme.site : enzyme.name;
+    line += '\t'; line += std::to_string(enzyme.cut_offset);
+    line += '\n';
+    out.write(line);
 }
 
 bool process_single_read(
@@ -61,7 +128,8 @@ bool process_single_read(
     FastqWriter& out_r1,
     FastqWriter& out_r2,
     ProcessingResult& result,
-    FastqWriter* out_segments
+    FastqWriter* out_segments,
+    TableWriter* out_table
 ) {
     // Input profile: recorded for every read, including ones skipped below,
     // so the report describes what was fed in rather than what survived.
@@ -120,17 +188,20 @@ bool process_single_read(
     result.pairs_per_read_stats.add(
         static_cast<int>(segments.size() * (segments.size() - 1) / 2));
 
+    // The parser finds the marker from the right, so a name that already
+    // carries it would still split, but its segments could no longer be
+    // told apart from those of a read named after them. The table keys on
+    // the same names, so it refuses such reads as well.
+    if ((out_segments || out_table) &&
+        name.find(SEGMENT_NAME_SEP) != std::string::npos) {
+        throw std::runtime_error("read name already contains " +
+                                 std::string(SEGMENT_NAME_SEP) + ": " + name);
+    }
+
     // Each retained segment once, as it lies in the read: this is what gets
     // mapped when contacts are reconstructed after alignment, so the R2
     // reverse complement (a paired-FASTQ concern) does not apply here.
     if (out_segments) {
-        // The parser finds the marker from the right, so a name that already
-        // carries it would still split, but its segments could no longer be
-        // told apart from those of a read named after them.
-        if (name.find(SEGMENT_NAME_SEP) != std::string::npos) {
-            throw std::runtime_error("read name already contains " +
-                                     std::string(SEGMENT_NAME_SEP) + ": " + name);
-        }
         for (size_t i = 0; i < segments.size(); i++) {
             const auto& [start, end] = segments[i];
             out_segments->write(segment_name(name, extraction.span_index[i]),
@@ -139,6 +210,16 @@ bool process_single_read(
             result.bases_out_segments += end - start;
         }
         result.segments_written += segments.size();
+    }
+
+    // The same segments, one table row each, in the same order.
+    if (out_table) {
+        std::string line;
+        for (size_t i = 0; i < segments.size(); i++) {
+            write_segments_table_row(*out_table, name, sequence.length(), extraction, i,
+                                     config.enzyme, line);
+        }
+        result.segments_table_rows += segments.size();
     }
 
     // Generate ALL pairs (n choose 2)

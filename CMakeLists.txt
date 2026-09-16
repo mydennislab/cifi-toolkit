@@ -35,6 +35,7 @@ nanobind_add_module(
     src/cifi_cpp/core/segment_name.cpp
     src/cifi_cpp/stats/statistics.cpp
     src/cifi_cpp/io/writer.cpp
+    src/cifi_cpp/io/table_writer.cpp
     src/cifi_cpp/filter/bam_filter.cpp
     src/cifi_cpp/contacts/contacts.cpp
 )

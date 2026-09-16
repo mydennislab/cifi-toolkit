@@ -97,4 +97,11 @@ private:
  */
 bool ends_with_gz(const std::string& path);
 
+/**
+ * A temporary name beside path that this run alone holds: created with
+ * O_EXCL, so two runs asked for the same output never share one. The
+ * caller opens it again by name and removes or renames it.
+ */
+std::string claim_temp_name(const std::string& path);
+
 } // namespace cifi

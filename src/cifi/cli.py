@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,22 @@ def main():
     https://voles.dennislab.org
     """
     pass
+
+
+def _command_line():
+    """The invocation, for the ##command= header line of the tables and the
+    statistics files. The program name is written as cifi whatever launched
+    it (python -m cifi.cli says cli.py)."""
+    return " ".join(["cifi"] + [shlex.quote(a) for a in sys.argv[1:]])
+
+
+# The native table formats, as their ##cifi_format= and ##format_version=
+# header lines name them. The statistics file of the command that wrote a
+# table carries the same pair under "format" (or "formats", keyed by output,
+# for digest, which can write two).
+TABLE_FORMATS = {
+    "segments": {"name": "segments", "version": 1},
+}
 
 
 def _validate_enzyme(ctx, param, value):
@@ -130,8 +147,14 @@ def _summarize(stats, fast_mode, histogram_bins=None, integer_valued=False):
     help="Also write each retained segment once to this FASTQ (.gz to compress), "
          "named <read>__CIFI_SEG__<n>, for mapping ahead of 'cifi contacts'"
 )
+@click.option(
+    "--segments-table", "segments_table", type=click.Path(), default=None,
+    help="Also write the segments table (bgzip TSV): one row per retained segment "
+         "with its span index, retained index and read coordinates"
+)
 def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, min_segment_len,
-           strip_overhang, revcomp_r2, report, write_json, gzip_output, fast_mode, segments_out):
+           strip_overhang, revcomp_r2, report, write_json, gzip_output, fast_mode, segments_out,
+           segments_table):
     """In-silico restriction digestion, generating paired-end FASTQ.
 
     Both mates of a pair share one read name, and -l bounds the length of the
@@ -141,12 +164,18 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
     in its native orientation, so it can be mapped a single time and the
     pairwise contacts reconstructed afterwards with 'cifi contacts'.
 
+    With --segments-table, the same segments are described one per row: which
+    cut span of the read each came from, its rank among the kept segments,
+    and where it lies in the read.
+
     \b
     Examples:
         cifi digest reads.bam -e HindIII -o output
         cifi digest reads.fq.gz -e NlaIII -o output -m 5 --gzip
         cifi digest reads.bam --site GANTC --cut-pos 1 -o output
         cifi digest reads.bam -e HindIII -o output --gzip --segments-out output.segments.fastq.gz
+        cifi digest reads.bam -e HindIII -o output --segments-out output.segments.fastq.gz \\
+            --segments-table output.segments.tsv.gz
     """
     from . import get_enzyme_info, is_bam_file, process_reads, process_reads_custom
 
@@ -201,19 +230,24 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
     click.echo(f"Stats mode:  {'fast (approximate)' if fast_mode else 'exact'}")
     if segments_out:
         click.echo(f"Segments:    {segments_out} (each retained segment once)")
+    if segments_table:
+        click.echo(f"Table:       {segments_table} (one row per retained segment)")
     click.echo("-" * 60)
     click.echo("Processing...", nl=False)
 
+    command = _command_line()
     try:
         if use_custom:
             result = process_reads_custom(
                 input_file, out_r1, out_r2, site, cut_offset, min_segments, min_segment_len,
-                strip_overhang, use_gzip, fast_mode, revcomp_r2, segments_out or ""
+                strip_overhang, use_gzip, fast_mode, revcomp_r2, segments_out or "",
+                segments_table or "", command, __version__
             )
         else:
             result = process_reads(
                 input_file, out_r1, out_r2, enzyme, min_segments, min_segment_len, strip_overhang,
-                use_gzip, fast_mode, revcomp_r2, segments_out or ""
+                use_gzip, fast_mode, revcomp_r2, segments_out or "",
+                segments_table or "", command, __version__
             )
     except Exception as e:
         click.echo(f"\nError: {e}", err=True)
@@ -259,6 +293,8 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
         avg_pairs = result.pairs_written / result.reads_out
         click.echo(f"  Avg segments/read:    {avg_segments:>12.1f}")
         click.echo(f"  Avg pairs/read:    {avg_pairs:>12.1f}")
+    if segments_table:
+        click.echo(f"  Table rows:        {result.segments_table_rows:>12,}")
 
     # Segment length statistics (using Statistics object)
     if result.segment_length_stats.count() > 0:
@@ -299,6 +335,8 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
     click.echo(f"  {out_r2}")
     if segments_out:
         click.echo(f"  {segments_out}")
+    if segments_table:
+        click.echo(f"  {segments_table}")
 
     # Build stats data for JSON and report
     stats_data = {
@@ -344,6 +382,16 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
         stats_data["results"]["segments_written"] = result.segments_written
         stats_data["results"]["bases_out_segments"] = result.bases_out_segments
         stats_data["output"]["segments"] = segments_out
+    # The table carries ##command= and ##cifi_format= lines; the
+    # statistics file repeats them, so a table can be matched to its run.
+    if segments_table:
+        stats_data["command"] = command
+        stats_data["formats"] = {}
+    if segments_table:
+        stats_data["parameters"]["segments_table"] = segments_table
+        stats_data["results"]["segments_table_rows"] = result.segments_table_rows
+        stats_data["output"]["segments_table"] = segments_table
+        stats_data["formats"]["segments_table"] = TABLE_FORMATS["segments"]
 
     # Segment length statistics from Statistics object
     if result.segment_length_stats.count() > 0:

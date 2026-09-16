@@ -13,6 +13,7 @@ import sys
 
 import pytest
 
+import cifi
 from cifi import parse_segment_name, process_reads, segment_name
 
 HINDIII_SITE = "AAGCTT"
@@ -347,3 +348,241 @@ def test_a_refused_bam_read_does_not_leak_the_open_file(tmp_path):
     for _ in range(20):
         failing_digest()
     assert len(os.listdir("/proc/self/fd")) == before
+
+
+# --- the segments table: one row per retained segment ----------------------
+#
+# `--segments-table` writes the digest's view of each molecule: where every
+# retained segment sat in the read, which cut span it came from, and what
+# the trim removed. Rows correspond one to one with --segments-out records.
+
+TABLE_COLUMNS = [
+    "molecule_id", "span_index", "retained_index", "segments_kept", "spans_total",
+    "read_length", "read_start", "read_end", "span_start", "span_end", "original_len",
+    "processed_len", "trimmed_5p", "terminal", "enzyme", "cut_offset",
+]
+
+
+def read_table(path):
+    """(header lines, rows as dicts) of a bgzip TSV with a #columns line."""
+    with gzip.open(path, "rt") as fh:
+        lines = [ln.rstrip("\n") for ln in fh]
+    header = [ln for ln in lines if ln.startswith("#")]
+    columns = next(ln for ln in header if ln.startswith("#columns:"))
+    names = columns[len("#columns:"):].split()
+    rows = [dict(zip(names, ln.split("\t"))) for ln in lines if not ln.startswith("#")]
+    for row in rows:
+        assert len(row) == len(names), row
+    return header, rows
+
+
+def header_metadata(header):
+    """The ##key=value lines of a native table header as a dict, checking
+    the shape: every line but the last is ##key=value, keys are unique,
+    and the last line is #columns:."""
+    assert header[-1].startswith("#columns: "), header[-1]
+    meta = {}
+    for line in header[:-1]:
+        assert line.startswith("##") and "=" in line, line
+        key, value = line[2:].split("=", 1)
+        assert key and key not in meta, line
+        meta[key] = value
+    return meta
+
+
+def run_digest_table(tmp_path, records, *, min_segments=2, min_segment_len=60,
+                     strip_overhang=True, segments_name="segments.fastq", enzyme="HindIII",
+                     site=None, cut_offset=None, command="cifi digest test"):
+    """Like run_digest, with --segments-table; returns (segs, table rows, header, result)."""
+    from cifi import process_reads_custom
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    recs = [r if len(r) == 3 else (r[0], r[1], "I" * len(r[1])) for r in records]
+    fq = tmp_path / "in.fastq"
+    write_fastq(fq, recs)
+    r1, r2 = tmp_path / "out_R1.fastq", tmp_path / "out_R2.fastq"
+    segs = tmp_path / segments_name if segments_name else None
+    table = tmp_path / "segments.tsv.gz"
+    args = (str(fq), str(r1), str(r2))
+    common = (min_segments, min_segment_len, strip_overhang, False, False, False,
+              str(segs) if segs else "", str(table), command, "1.1.0-test")
+    if site is not None:
+        result = process_reads_custom(*args, site, cut_offset, *common)
+    else:
+        result = process_reads(*args, enzyme, *common)
+    header, rows = read_table(table)
+    return (read_fastq(segs) if segs else []), rows, header, result
+
+
+def test_table_rows_correspond_to_the_segment_records(tmp_path):
+    reads = [("a", make_read(400, 300, 250, 200)), ("b", make_read(400, 60 + OVERHANG - 1, 300))]
+    segs, rows, header, result = run_digest_table(tmp_path, reads)
+
+    assert [f"{r['molecule_id']}{SEP}{r['span_index']}" for r in rows] == [n for n, _, _ in segs]
+    assert result.segments_table_rows == len(rows) == len(segs) == 6
+    assert list(rows[0]) == TABLE_COLUMNS
+
+
+def test_table_indices_and_totals(tmp_path):
+    """span_index has the gap of the dropped span; retained_index is dense."""
+    read = make_read(400, 60 + OVERHANG - 1, 300, 200)
+    _, rows, _, _ = run_digest_table(tmp_path, [("r", read)])
+
+    assert [int(r["span_index"]) for r in rows] == [1, 3, 4]
+    assert [int(r["retained_index"]) for r in rows] == [1, 2, 3]
+    assert {r["segments_kept"] for r in rows} == {"3"}
+    assert {r["spans_total"] for r in rows} == {"4"}
+    assert {r["molecule_id"] for r in rows} == {"r"}
+
+
+def test_table_coordinates_slice_the_read_to_the_segment_sequence(tmp_path):
+    read = make_read(400, 300, 60 + OVERHANG - 1, 250, 200)
+    qual = ramped_quality(len(read))
+    segs, rows, _, _ = run_digest_table(tmp_path, [("r", read, qual)])
+
+    spans = expected_spans(read, 60)
+    assert [(int(r["read_start"]), int(r["read_end"])) for r in rows] == [(s, e) for _, s, e in spans]
+    assert {r["read_length"] for r in rows} == {str(len(read))}
+    assert all(int(r["read_end"]) <= int(r["read_length"]) for r in rows)
+    for row, (_, seq, _) in zip(rows, segs):
+        s, e = int(row["read_start"]), int(row["read_end"])
+        assert read[s:e] == seq
+        assert int(row["processed_len"]) == e - s == len(seq)
+        ss, se = int(row["span_start"]), int(row["span_end"])
+        assert int(row["original_len"]) == se - ss
+        assert int(row["trimmed_5p"]) == s - ss
+        assert se == e
+    # the leading span starts at the read start and carries no remnant
+    assert rows[0]["span_start"] == "0" and rows[0]["trimmed_5p"] == "0"
+    # every later retained span begins at a cut and lost the 5 bp remnant
+    assert {r["trimmed_5p"] for r in rows[1:]} == {str(OVERHANG)}
+    # the untrimmed spans tile the read between the cuts
+    untrimmed = expected_spans(read, 1, lead_trim=0)
+    by_index = {k: (s, e) for k, s, e in untrimmed}
+    for row in rows:
+        assert (int(row["span_start"]), int(row["span_end"])) == by_index[int(row["span_index"])]
+
+
+def test_table_without_strip_keeps_span_and_read_coordinates_equal(tmp_path):
+    read = make_read(400, 300, 250)
+    _, rows, _, _ = run_digest_table(tmp_path, [("r", read)], strip_overhang=False)
+
+    for row in rows:
+        assert row["trimmed_5p"] == "0"
+        assert row["read_start"] == row["span_start"] and row["read_end"] == row["span_end"]
+        assert row["original_len"] == row["processed_len"]
+
+
+def test_table_terminal_flags(tmp_path):
+    reads = [
+        ("four", make_read(400, 300, 250, 200)),
+        ("gap_at_end", make_read(400, 300, 60 + OVERHANG - 1)),   # last span dropped
+        ("single", block("ACGT", 500)),                            # no site at all
+    ]
+    _, rows, _, _ = run_digest_table(tmp_path, reads, min_segments=1)
+
+    flags = {(r["molecule_id"], int(r["span_index"])): r["terminal"] for r in rows}
+    assert flags[("four", 1)] == "T5" and flags[("four", 4)] == "T3"
+    assert flags[("four", 2)] == flags[("four", 3)] == "I"
+    # the retained last segment of gap_at_end is span 2 of 3: interior
+    assert flags[("gap_at_end", 1)] == "T5" and flags[("gap_at_end", 2)] == "I"
+    assert ("gap_at_end", 3) not in flags
+    assert flags[("single", 1)] == "T5T3"
+    single = next(r for r in rows if r["molecule_id"] == "single")
+    assert (single["spans_total"], single["segments_kept"]) == ("1", "1")
+
+
+def test_table_records_the_enzyme_and_cut(tmp_path):
+    _, rows_named, _, _ = run_digest_table(tmp_path / "named", [("r", make_read(400, 300, 250))])
+    read_gatc = "GATC".join([block("ACGT", 300), block("ACCG", 200), block("AGGC", 250)])
+    _, rows_custom, _, _ = run_digest_table(tmp_path / "custom", [("r", read_gatc)],
+                                            site="GATC", cut_offset=0)
+
+    assert {(r["enzyme"], r["cut_offset"]) for r in rows_named} == {("HindIII", "1")}
+    assert {(r["enzyme"], r["cut_offset"]) for r in rows_custom} == {("GATC", "0")}
+    assert len(rows_custom) == 3
+
+
+def test_table_header_lines_and_bgzip(tmp_path):
+    _, rows, header, _ = run_digest_table(tmp_path, [("r", make_read(400, 300, 250))],
+                                          command="cifi digest in.fastq -e HindIII -o out")
+
+    assert header == [
+        "##cifi_format=segments",
+        "##format_version=1",
+        "##tool_version=1.1.0-test",
+        "##command=cifi digest in.fastq -e HindIII -o out",
+        "##read_coordinates=0-based-half-open",
+        "##span_index=1-based-original-digest-span",
+        "##retained_index=1-based-dense-retained-order",
+        "##terminal=T5,T3,I,T5T3",
+        "#columns: " + "\t".join(TABLE_COLUMNS),
+    ]
+    assert header_metadata(header)["cifi_format"] == "segments"
+    raw = (tmp_path / "segments.tsv.gz").read_bytes()
+    # gzip magic, then the BGZF extra subfield 'BC' that marks a block
+    assert raw[:2] == b"\x1f\x8b" and raw[12:14] == b"BC"
+    # the file is a run of complete blocks, ending in the 28-byte EOF block
+    assert raw.endswith(bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000"))
+
+
+def test_table_is_written_without_segments_out(tmp_path):
+    segs, rows, _, result = run_digest_table(tmp_path, [("r", make_read(400, 300, 250))],
+                                             segments_name=None)
+
+    assert segs == [] and len(rows) == 3
+    assert result.segments_written == 0 and result.segments_table_rows == 3
+
+
+def test_table_lists_only_passing_reads(tmp_path):
+    reads = [
+        ("pass", make_read(400, 300, 200)),
+        ("few_sites", block("ACGT", 500)),
+        ("too_few", make_read(400, 300)),
+    ]
+    _, rows, _, _ = run_digest_table(tmp_path, reads, min_segments=3)
+
+    assert {r["molecule_id"] for r in rows} == {"pass"}
+
+
+def test_fastq_outputs_are_byte_identical_with_and_without_the_table(tmp_path):
+    import hashlib
+
+    def md5(path):
+        return hashlib.md5(path.read_bytes()).hexdigest()
+
+    reads = [("a", make_read(400, 300, 250, 200), ramped_quality(len(make_read(400, 300, 250, 200)))),
+             ("b", make_read(400, 60 + OVERHANG - 1, 300))]
+    run_digest(tmp_path / "w", reads)
+    run_digest_table(tmp_path / "t", reads)
+
+    for name in ("out_R1.fastq", "out_R2.fastq", "segments.fastq"):
+        assert md5(tmp_path / "w" / name) == md5(tmp_path / "t" / name), name
+    assert not (tmp_path / "w" / "segments.tsv.gz").exists()
+
+
+def test_cli_writes_the_table_and_records_it_in_the_stats(tmp_path):
+    import json
+    fq = tmp_path / "in.fastq"
+    read = make_read(400, 300, 250, 200)
+    write_fastq(fq, [("r1", read, "I" * len(read))])
+    table = tmp_path / "out.segments.tsv.gz"
+    proc = subprocess.run(
+        [sys.executable, "-m", "cifi.cli", "digest", str(fq), "-e", "HindIII",
+         "-o", str(tmp_path / "out"), "--segments-table", str(table), "--no-report"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert str(table) in proc.stdout
+    header, rows = read_table(table)
+    assert len(rows) == 4
+    meta = header_metadata(header)
+    assert meta["command"].startswith("cifi digest ") and "--segments-table" in meta["command"]
+    assert meta["tool_version"] == cifi.__version__
+    stats = json.loads((tmp_path / "out_stats.json").read_text())
+    assert stats["output"]["segments_table"] == str(table)
+    assert stats["results"]["segments_table_rows"] == 4
+    assert stats["parameters"]["segments_table"] == str(table)
+    # the statistics repeat the table's provenance lines
+    assert stats["command"] == meta["command"]
+    assert stats["cifi_version"] == meta["tool_version"]
+    assert stats["formats"] == {"segments_table": {"name": "segments", "version": 1}}
