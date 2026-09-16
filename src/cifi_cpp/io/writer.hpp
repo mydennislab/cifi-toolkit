@@ -62,6 +62,30 @@ private:
 std::unique_ptr<FastqWriter> make_writer(const std::string& path, bool force_gzip);
 
 /**
+ * Buffered writer for line-oriented contact output (PA5 or BED), gzip
+ * compressed when the path ends in .gz.
+ *
+ * Lines are collected into a block before they reach the file, so writing a
+ * contact costs an append rather than a syscall or a deflate call each.
+ */
+class TextWriter {
+public:
+    explicit TextWriter(const std::string& path);
+    ~TextWriter();
+
+    void write(const std::string& line);  // line carries its own newline
+    void close();
+
+private:
+    void flush();
+
+    std::string path_;
+    std::ofstream out_;
+    gzFile gz_ = nullptr;
+    std::string buf_;
+};
+
+/**
  * Helper: check if path ends with .gz
  */
 bool ends_with_gz(const std::string& path);

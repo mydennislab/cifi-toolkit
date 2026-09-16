@@ -125,18 +125,28 @@ def _summarize(stats, fast_mode, histogram_bins=None, integer_valued=False):
     "--fast", "fast_mode", is_flag=True, default=False,
     help="Use streaming statistics (lower memory, approximate percentiles)"
 )
+@click.option(
+    "--segments-out", "segments_out", type=click.Path(), default=None,
+    help="Also write each retained segment once to this FASTQ (.gz to compress), "
+         "named <read>__CIFI_SEG__<n>, for mapping ahead of 'cifi contacts'"
+)
 def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, min_segment_len,
-           strip_overhang, revcomp_r2, report, write_json, gzip_output, fast_mode):
+           strip_overhang, revcomp_r2, report, write_json, gzip_output, fast_mode, segments_out):
     """In-silico restriction digestion, generating paired-end FASTQ.
 
     Both mates of a pair share one read name, and -l bounds the length of the
     emitted reads, so R1 and R2 stay in step and neither drops below the cutoff.
+
+    With --segments-out, every retained segment is additionally written once,
+    in its native orientation, so it can be mapped a single time and the
+    pairwise contacts reconstructed afterwards with 'cifi contacts'.
 
     \b
     Examples:
         cifi digest reads.bam -e HindIII -o output
         cifi digest reads.fq.gz -e NlaIII -o output -m 5 --gzip
         cifi digest reads.bam --site GANTC --cut-pos 1 -o output
+        cifi digest reads.bam -e HindIII -o output --gzip --segments-out output.segments.fastq.gz
     """
     from . import get_enzyme_info, is_bam_file, process_reads, process_reads_custom
 
@@ -189,6 +199,8 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
                    f"leaves no 5' remnant on the downstream segment.", err=True)
     click.echo(f"Compression: {'gzip' if use_gzip else 'none'}")
     click.echo(f"Stats mode:  {'fast (approximate)' if fast_mode else 'exact'}")
+    if segments_out:
+        click.echo(f"Segments:    {segments_out} (each retained segment once)")
     click.echo("-" * 60)
     click.echo("Processing...", nl=False)
 
@@ -196,12 +208,12 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
         if use_custom:
             result = process_reads_custom(
                 input_file, out_r1, out_r2, site, cut_offset, min_segments, min_segment_len,
-                strip_overhang, use_gzip, fast_mode, revcomp_r2
+                strip_overhang, use_gzip, fast_mode, revcomp_r2, segments_out or ""
             )
         else:
             result = process_reads(
                 input_file, out_r1, out_r2, enzyme, min_segments, min_segment_len, strip_overhang,
-                use_gzip, fast_mode, revcomp_r2
+                use_gzip, fast_mode, revcomp_r2, segments_out or ""
             )
     except Exception as e:
         click.echo(f"\nError: {e}", err=True)
@@ -234,6 +246,13 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
 
     click.echo(f"\n  Total segments:   {result.total_segments:>12,}")
     click.echo(f"  Total pairs:       {result.pairs_written:>12,}")
+    if segments_out:
+        # Mapping work: the pairs route maps two mates per pair, the segments
+        # route maps each segment once.
+        mates = 2 * result.pairs_written
+        ratio = mates / result.segments_written if result.segments_written else 0
+        click.echo(f"  Unique segments:   {result.segments_written:>12,} "
+                   f"(vs {mates:,} R1/R2 mates, {ratio:.1f}x fewer to map)")
 
     if result.reads_out > 0:
         avg_segments = result.total_segments / result.reads_out
@@ -278,6 +297,8 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
     click.echo("\nOUTPUT FILES:")
     click.echo(f"  {out_r1}")
     click.echo(f"  {out_r2}")
+    if segments_out:
+        click.echo(f"  {segments_out}")
 
     # Build stats data for JSON and report
     stats_data = {
@@ -317,6 +338,12 @@ def digest(input_file, enzyme, site, cut_offset, output_prefix, min_segments, mi
             "r2": out_r2,
         },
     }
+    # Only present when requested, so the stats file is unchanged otherwise
+    if segments_out:
+        stats_data["parameters"]["segments_out"] = segments_out
+        stats_data["results"]["segments_written"] = result.segments_written
+        stats_data["results"]["bases_out_segments"] = result.bases_out_segments
+        stats_data["output"]["segments"] = segments_out
 
     # Segment length statistics from Statistics object
     if result.segment_length_stats.count() > 0:
@@ -858,6 +885,205 @@ def filter_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
             from .report import generate_filter_report
             report_file = f"{output_prefix}_filter_report.html"
             generate_filter_report(stats_data, report_file)
+            output_files.append(report_file)
+        except ImportError as e:
+            if not quiet:
+                click.echo(f"\nWarning: Report skipped (missing jinja2): {e}", err=True)
+        except Exception as e:
+            if not quiet:
+                click.echo(f"\nWarning: Report failed: {e}", err=True)
+
+    if not quiet:
+        click.echo("\nOutput files:")
+        for f in output_files:
+            click.echo(f"  {f}")
+
+
+CONTACTS_FORMATS = ("pa5", "bed")
+
+# What the coordinate columns hold, per format, for the statistics file
+CONTACTS_POSITION = {
+    "pa5": "0-based alignment midpoint, as YaHS derives from a name-sorted BAM",
+    "bed": "0-based alignment start and exclusive end of the primary record",
+}
+
+
+def _contacts_format_from_name(path):
+    """Format yahs itself reads off the name (.bed/.pa5, .gz allowed); None if neither."""
+    name = path.lower()
+    if name.endswith(".gz"):
+        name = name[:-3]
+    for fmt in CONTACTS_FORMATS:
+        if name.endswith("." + fmt):
+            return fmt
+    return None
+
+
+def _strip_contacts_suffix(path):
+    """Prefix for the side files of a contacts output, whatever its extension."""
+    for suffix in (".pa5.gz", ".pa5", ".bed.gz", ".bed", ".txt.gz", ".txt", ".gz"):
+        if path.endswith(suffix):
+            return path[:-len(suffix)]
+    return path
+
+
+@main.command("contacts")
+@click.argument("input_bam", type=click.Path(exists=True))
+@click.option("-o", "--output", required=True,
+              help="Output contacts file (.gz to compress)")
+@click.option("--format", "output_format",
+              type=click.Choice(CONTACTS_FORMATS, case_sensitive=False), default=None,
+              help="Output format; taken from the output name (.bed or .pa5) when "
+                   "omitted, pa5 for any other name")
+@click.option("-q", "--mapq", default=1, show_default=True,
+              help="Minimum MAPQ for a segment to take part in contacts")
+@click.option("-t", "--threads", default=4, show_default=True,
+              help="Number of threads for BAM decompression")
+@click.option("--report/--no-report", default=True, show_default=True,
+              help="Generate HTML report")
+@click.option("--json/--no-json", "write_json", default=True, show_default=True,
+              help="Write JSON statistics file")
+@click.option("--quiet", is_flag=True, help="Suppress terminal output")
+def contacts_cmd(input_bam, output, output_format, mapq, threads, report, write_json, quiet):
+    """Reconstruct pairwise contacts from mapped unique segments for YaHS.
+
+    INPUT_BAM holds alignments of the segments written by
+    'cifi digest --segments-out', grouped by read name:
+
+    \b
+        minimap2 -ax map-hifi asm.fa sample.segments.fastq.gz \\
+            | samtools sort -n -o sample.segments.ns.bam
+
+    Every read with k primary mapped segments at or above -q yields the
+    k(k-1)/2 pairs among them. Two output formats:
+
+    \b
+        pa5  one row per contact, alignment midpoints:
+             pair_name  contig1  pos1  contig2  pos2  mapq1  mapq2
+        bed  two consecutive rows per contact, each segment's aligned span:
+             contig  start  end  pair_name  mapq
+
+    YaHS reads either. With PA5 it rebuilds an interval around each point
+    from one global --read-length, which does not fit variable-length CiFi
+    segments; BED hands it the real spans, so it is the format to scaffold
+    with. Only primary alignments count; secondary and supplementary
+    records are ignored. Segments of different reads are never paired.
+
+    \b
+    Examples:
+        cifi contacts sample.segments.ns.bam -o sample.bed -q 1
+        cifi contacts sample.segments.ns.bam -o sample.pa5 -q 1
+    """
+    from . import reconstruct_contacts
+
+    named_format = _contacts_format_from_name(output)
+    output_format = (output_format or named_format or "pa5").lower()
+    if named_format and named_format != output_format:
+        # yahs picks the parser by extension unless told --file-type
+        click.echo(f"Warning: writing {output_format.upper()} to a file named "
+                   f".{named_format}; yahs will read it as {named_format.upper()} "
+                   "unless given --file-type", err=True)
+
+    try:
+        result = reconstruct_contacts(input_bam, output, mapq, threads, output_format)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    contributing = result.reads_with_contacts
+    usable = result.usable_per_read_stats
+    per_read = result.contacts_per_read_stats
+    # Query sequences handed to the aligner: the pairs route maps n(n-1)
+    # mates per read, this route n segments (secondary and supplementary
+    # records are the aligner's, so they do not enter the comparison).
+    work_ratio = (result.pair_mates_equivalent / result.segments_seen
+                  if result.segments_seen else 0)
+
+    if not quiet:
+        click.echo("\nContacts Summary")
+        click.echo(f"{'─' * 40}")
+        click.echo(f"Output format:      {output_format.upper()}")
+        click.echo(f"Sort order:         {result.sort_order or 'not in header'}")
+        click.echo(f"Alignment records:  {result.records_seen:,}")
+        click.echo(f"Segments:           {result.segments_seen:,} in {result.reads_seen:,} reads")
+        click.echo(f"  primary mapped:   {result.primary_mapped:,}")
+        click.echo(f"  unmapped:         {result.unmapped:,}")
+        click.echo(f"  MAPQ < {mapq}:{'':<9}{result.below_mapq:,}")
+        click.echo(f"  secondary skipped:     {result.secondary_ignored:,}")
+        click.echo(f"  supplementary skipped: {result.supplementary_ignored:,}")
+        click.echo(f"Usable segments:    {result.usable_segments:,}")
+        click.echo(f"Reads with contacts: {contributing:,}")
+        if contributing:
+            click.echo(f"  segments/read:    mean {usable.mean():.1f}, median {usable.median():.0f}, "
+                       f"max {result.max_usable_in_read:,}")
+            click.echo(f"  contacts/read:    mean {per_read.mean():.1f}, "
+                       f"max {result.max_contacts_in_read:,}")
+        click.echo(f"Contacts written:   {result.contacts_written:,}")
+        click.echo(f"{'─' * 40}")
+        click.echo(f"Mapped {result.segments_seen:,} segments instead of "
+                   f"{result.pair_mates_equivalent:,} R1/R2 mates ({work_ratio:.1f}x fewer)")
+
+    if result.duplicate_primary:
+        click.echo(f"Warning: {result.duplicate_primary:,} extra primary records for segments "
+                   "already seen were ignored (first record kept); is the input a "
+                   "concatenation of several alignments?", err=True)
+    if result.sort_order != "queryname":
+        click.echo("Warning: the header does not declare queryname sort order; segments "
+                   "were taken to be grouped by read as minimap2 emits them.", err=True)
+
+    output_prefix = _strip_contacts_suffix(output)
+    stats_data = {
+        "cifi_version": __version__,
+        "timestamp": datetime.now().isoformat(),
+        "input": {
+            "file": os.path.basename(input_bam),
+            "path": os.path.abspath(input_bam),
+            "sort_order": result.sort_order,
+        },
+        "parameters": {
+            "mapq_threshold": mapq,
+            "threads": threads,
+            "output_format": output_format,
+            "position": CONTACTS_POSITION[output_format],
+        },
+        "results": {
+            "records_seen": result.records_seen,
+            "segments_seen": result.segments_seen,
+            "reads_seen": result.reads_seen,
+            "primary_mapped": result.primary_mapped,
+            "unmapped": result.unmapped,
+            "secondary_ignored": result.secondary_ignored,
+            "supplementary_ignored": result.supplementary_ignored,
+            "duplicate_primary": result.duplicate_primary,
+            "below_mapq": result.below_mapq,
+            "usable_segments": result.usable_segments,
+            "reads_with_contacts": contributing,
+            "contacts_written": result.contacts_written,
+            "max_usable_in_read": result.max_usable_in_read,
+            "max_contacts_in_read": result.max_contacts_in_read,
+            "mean_usable_per_contributing_read": usable.mean() if contributing else 0,
+            "median_usable_per_contributing_read": usable.median() if contributing else 0,
+            "mean_contacts_per_contributing_read": per_read.mean() if contributing else 0,
+            "pair_mates_equivalent": result.pair_mates_equivalent,
+            "mapping_work_reduction": work_ratio,
+        },
+        "output": {
+            "file": output,
+        },
+    }
+
+    output_files = [output]
+    if write_json:
+        json_file = f"{output_prefix}_contacts_stats.json"
+        with open(json_file, "w") as f:
+            json.dump(stats_data, f, indent=2)
+        output_files.append(json_file)
+
+    if report:
+        try:
+            from .report import generate_contacts_report
+            report_file = f"{output_prefix}_contacts_report.html"
+            generate_contacts_report(stats_data, report_file)
             output_files.append(report_file)
         except ImportError as e:
             if not quiet:
