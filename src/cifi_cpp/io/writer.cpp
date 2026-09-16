@@ -135,4 +135,76 @@ std::unique_ptr<FastqWriter> make_writer(const std::string& path, bool force_gzi
     return std::make_unique<PlainFastqWriter>(path);
 }
 
+// TextWriter
+
+static const size_t TEXT_WRITER_BLOCK = 1 << 20;
+
+TextWriter::TextWriter(const std::string& path) : path_(path) {
+    if (ends_with_gz(path)) {
+        gz_ = gzopen(path.c_str(), "wb");
+        if (!gz_) {
+            throw std::runtime_error("Cannot open for gzip writing: " + path);
+        }
+    } else {
+        out_.open(path);
+        if (!out_) {
+            throw std::runtime_error("Cannot open for writing: " + path);
+        }
+    }
+    buf_.reserve(TEXT_WRITER_BLOCK + 4096);
+}
+
+TextWriter::~TextWriter() {
+    // As for the FASTQ writers: close() throws on a failed flush, which must
+    // not escape a destructor. Callers close() explicitly to see the error.
+    try {
+        close();
+    } catch (...) {
+    }
+}
+
+void TextWriter::write(const std::string& line) {
+    buf_ += line;
+    if (buf_.size() >= TEXT_WRITER_BLOCK) {
+        flush();
+    }
+}
+
+void TextWriter::flush() {
+    if (buf_.empty()) return;
+    if (gz_) {
+        int written = gzwrite(gz_, buf_.data(), static_cast<unsigned>(buf_.size()));
+        if (written != static_cast<int>(buf_.size())) {
+            int err = 0;
+            const char* msg = gzerror(gz_, &err);
+            throw std::runtime_error("Failed writing " + path_ + ": " +
+                                     (msg ? msg : "short write"));
+        }
+    } else {
+        out_.write(buf_.data(), static_cast<std::streamsize>(buf_.size()));
+        if (!out_) {
+            throw std::runtime_error("Failed writing " + path_);
+        }
+    }
+    buf_.clear();
+}
+
+void TextWriter::close() {
+    if (gz_) {
+        flush();
+        int rc = gzclose(gz_);
+        gz_ = nullptr;
+        if (rc != Z_OK) {
+            throw std::runtime_error("Failed closing " + path_ + " (zlib code " +
+                                     std::to_string(rc) + ")");
+        }
+    } else if (out_.is_open()) {
+        flush();
+        out_.close();
+        if (out_.fail()) {
+            throw std::runtime_error("Failed closing " + path_);
+        }
+    }
+}
+
 } // namespace cifi

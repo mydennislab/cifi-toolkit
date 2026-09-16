@@ -6,10 +6,10 @@
 
 Toolkit for quality control and downstream processing of **CiFi long reads**.
 
-CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. A single CiFi read can contain multiple proximity-ligated genomic segments. `cifi-toolkit` identifies those segments and converts each multi-contact read into Hi-C-like paired contacts for downstream applications such as genome assembly, phasing, contact-map generation, and scaffolding.
+CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. A single CiFi read can contain multiple proximity-ligated genomic segments. `cifi-toolkit` identifies those segments and converts each multi-contact read into pairwise contacts for downstream applications such as genome assembly, phasing, contact-map generation, and scaffolding.
 
-- https://cifi.dennislab.org
-- https://voles.dennislab.org
+* https://cifi.dennislab.org
+* https://voles.dennislab.org
 
 ---
 
@@ -22,9 +22,18 @@ CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. 
 
   * [`cifi qc`](#cifi-qc)
   * [`cifi digest`](#cifi-digest)
+  * [`cifi contacts`](#cifi-contacts)
   * [`cifi filter`](#cifi-filter)
   * [`cifi enzymes`](#cifi-enzymes)
 * [How CiFi reads become paired contacts](#how-cifi-reads-become-paired-contacts)
+* [Unique segments and native contact reconstruction](#unique-segments-and-native-contact-reconstruction)
+
+  * [Two representations of the same CiFi contacts](#two-representations-of-the-same-cifi-contacts)
+  * [Segment names](#segment-names)
+  * [Mapping unique segments](#mapping-unique-segments)
+  * [Alignment filtering](#alignment-filtering)
+  * [BED output](#bed-output)
+  * [PA5 output](#pa5-output)
 * [Digest behavior and options](#digest-behavior-and-options)
 
   * [Minimum number of segments](#minimum-number-of-segments)
@@ -48,14 +57,15 @@ CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. 
 
 Unlike conventional paired-end Hi-C, a CiFi read can contain **multiple interacting genomic segments in one long PacBio HiFi read**.
 
-`cifi-toolkit` provides four main functions:
+`cifi-toolkit` provides five main functions:
 
-| Command        | Purpose                                                      |
-| -------------- | ------------------------------------------------------------ |
-| `cifi qc`      | Characterize CiFi reads and estimate digestion/contact yield |
-| `cifi digest`  | Digest CiFi reads in silico and generate paired-end contacts |
-| `cifi filter`  | Filter aligned paired contacts by mapping status and MAPQ    |
-| `cifi enzymes` | List built-in restriction enzymes and cut positions          |
+| Command         | Purpose                                                                      |
+| --------------- | ---------------------------------------------------------------------------- |
+| `cifi qc`       | Characterize CiFi reads and estimate digestion/contact yield                 |
+| `cifi digest`   | Digest CiFi reads in silico; generate paired contacts and/or unique segments |
+| `cifi contacts` | Reconstruct all pairwise contacts from mapped unique segments                |
+| `cifi filter`   | Filter aligned paired contacts by mapping status and MAPQ                    |
+| `cifi enzymes`  | List built-in restriction enzymes and cut positions                          |
 
 A typical analysis looks like:
 
@@ -68,25 +78,38 @@ PacBio CiFi reads
        ▼
   cifi digest
        │
-       ▼
-R1 FASTQ + R2 FASTQ
-       │
-       ├───────────────► hifiasm
-       │                 phasing / assembly
-       │
-       ▼
-     mapping
-       │
-       ▼
-   cifi filter
-       │
-       ├───────────────► contact maps
-       └───────────────► scaffolding
+       ├──────────────────────────────┐
+       ▼                              ▼
+R1 FASTQ + R2 FASTQ           unique segments FASTQ
+       │                       (--segments-out)
+       │                              │
+       ▼                              ▼
+    hifiasm                      minimap2
+ phasing/assembly              map each segment once
+                                      │
+                                      ▼
+                               samtools sort -n
+                                      │
+                                      ▼
+                                cifi contacts
+                                      │
+                                      ▼
+                               BED contacts
+                                      │
+                                      ▼
+                                    YaHS
+                                  scaffolding
 ```
+
+The paired R1/R2 representation is useful for tools such as hifiasm that require paired reads.
+
+For scaffolding, the unique-segment route avoids repeatedly mapping the same CiFi segment. Each segment is mapped once and the full set of pairwise contacts is reconstructed afterward from its alignment.
 
 ---
 
 # Installation
+
+## Released version
 
 Using pip:
 
@@ -114,7 +137,9 @@ cifi --help
 ## 1. Check the CiFi library
 
 ```bash
-cifi qc reads.bam -e HindIII -o qc_out
+cifi qc reads.bam \
+    -e HindIII \
+    -o qc_out
 ```
 
 By default, `cifi qc` samples 10,000 reads and reports properties including:
@@ -132,10 +157,14 @@ The QC step does **not** generate paired FASTQ files.
 
 ---
 
-## 2. Generate paired contacts
+## 2. Generate paired contacts and unique segments
 
 ```bash
-cifi digest reads.bam -e HindIII -o sample --gzip
+cifi digest reads.bam \
+    -e HindIII \
+    -o sample \
+    --gzip \
+    --segments-out sample.segments.fastq.gz
 ```
 
 This produces:
@@ -143,17 +172,20 @@ This produces:
 ```text
 sample_R1.fastq.gz
 sample_R2.fastq.gz
+sample.segments.fastq.gz
 sample_stats.json
 sample_digestion_report.html
 ```
 
-The R1 and R2 files contain pairwise contacts generated from the CiFi reads.
+The R1 and R2 files contain all pairwise contacts generated from each CiFi read.
+
+The segments file contains each retained CiFi segment **once**.
 
 ---
 
-## 3. Use the contacts downstream
+## 3. Use R1/R2 for hifiasm
 
-For example, the generated contacts can be supplied to hifiasm for Hi-C-assisted phasing:
+For example:
 
 ```bash
 hifiasm \
@@ -164,21 +196,60 @@ hifiasm \
     hifi_reads.fa
 ```
 
-The paired reads can also be aligned to an assembly for contact-map generation or scaffolding.
+---
+
+## 4. Map unique segments once
+
+For scaffolding, map the unique segments rather than the pair-expanded R1/R2 files:
+
+```bash
+minimap2 -t 32 \
+    -ax map-hifi \
+    --secondary=no \
+    --no-hash-name \
+    assembly.fa \
+    sample.segments.fastq.gz \
+  | samtools sort -n -@ 8 \
+      -o sample.segments.ns.bam
+```
+
+`samtools sort -n` is required because `cifi contacts` processes all segments belonging to the same original CiFi read together.
+
+`--secondary=no` suppresses secondary alignments so the standard contact-reconstruction path retains a single primary placement for each mapped segment.
+
+`--no-hash-name` prevents query-name-dependent tie breaking for equally scoring mappings.
 
 ---
 
-## 4. Filter mapped pairs
+## 5. Reconstruct CiFi contacts
 
-After alignment:
+The recommended output for CiFi scaffolding is BED:
 
 ```bash
-cifi filter aligned.bam \
-    -o filtered.bam \
-    -q 30
+cifi contacts sample.segments.ns.bam \
+    --format bed \
+    -q 1 \
+    -o sample.contacts.bed
 ```
 
-Both mates must be mapped and meet the requested MAPQ threshold for the pair to be retained.
+Then scaffold with YaHS:
+
+```bash
+yahs \
+    -q 0 \
+    --no-contig-ec \
+    -o sample.yahs \
+    assembly.fa \
+    sample.contacts.bed
+```
+
+The MAPQ filtering is intentionally applied once:
+
+```text
+cifi contacts -q 1
+        ↓
+      YaHS -q 0
+```
 
 ---
 
@@ -250,9 +321,9 @@ The reports summarize the input reads, enzyme-site distribution, expected segmen
 
 ## `cifi digest`
 
-`cifi digest` converts multi-contact CiFi reads into paired FASTQ contacts.
+`cifi digest` performs in-silico restriction digestion of CiFi reads.
 
-Basic usage:
+Basic paired-contact output:
 
 ```bash
 cifi digest reads.bam \
@@ -292,11 +363,108 @@ For each CiFi read, the command:
 
 Only segments from the **same original CiFi read** are paired with one another.
 
+### Unique segment output
+
+With `--segments-out`, each retained segment is additionally written **once**:
+
+```bash
+cifi digest reads.bam \
+    -e HindIII \
+    -o sample \
+    --gzip \
+    --segments-out sample.segments.fastq.gz
+```
+
+The unique segments are the same processed sequences used to generate R1/R2 pairs.
+
+The segments file is gzip-compressed when the output name ends in `.gz`; otherwise it is written as plain FASTQ.
+
+`--gzip` controls R1/R2 compression independently.
+
+The existing R1/R2 output, statistics, and report are unchanged by requesting `--segments-out`.
+
+---
+
+## `cifi contacts`
+
+`cifi contacts` reconstructs pairwise contacts from mapped unique CiFi segments.
+
+Input is a **name-sorted BAM** containing alignments of the segments produced by:
+
+```bash
+cifi digest ... --segments-out
+```
+
+Recommended mapping:
+
+```bash
+minimap2 -t 32 \
+    -ax map-hifi \
+    --secondary=no \
+    --no-hash-name \
+    assembly.fa \
+    sample.segments.fastq.gz \
+  | samtools sort -n -@ 8 \
+      -o sample.segments.ns.bam
+```
+
+Generate BED contacts:
+
+```bash
+cifi contacts sample.segments.ns.bam \
+    --format bed \
+    -q 1 \
+    -o sample.contacts.bed
+```
+
+Or PA5:
+
+```bash
+cifi contacts sample.segments.ns.bam \
+    --format pa5 \
+    -q 1 \
+    -o sample.contacts.pa5
+```
+
+For every original CiFi read containing `k` usable mapped segments, `cifi contacts` emits:
+
+```text
+k × (k - 1) / 2
+```
+
+contacts.
+
+Processing is streaming: only the segments from one CiFi molecule need to be held in memory at a time.
+
+### Alignment requirements
+
+The BAM must be grouped by read name:
+
+```bash
+samtools sort -n
+```
+
+Only primary mapped alignments that pass the requested MAPQ threshold participate in contact generation.
+
+Unmapped, secondary, and supplementary alignments are ignored.
+
+Segments from different original CiFi molecules are never paired.
+
+### Common options
+
+```text
+--format       output representation: bed or pa5
+-q, --mapq     minimum segment MAPQ                [default: 1]
+-t, --threads  BAM decompression threads           [default: 4]
+--no-json      skip statistics JSON
+--no-report    skip HTML report
+```
+
 ---
 
 ## `cifi filter`
 
-After paired contacts have been aligned, `cifi filter` retains confidently mapped pairs.
+After paired R1/R2 contacts have been aligned, `cifi filter` retains confidently mapped pairs.
 
 ```bash
 cifi filter aligned.bam \
@@ -332,7 +500,7 @@ An HTML report and JSON statistics are generated by default.
 
 ## `cifi enzymes`
 
-List the built-in restriction enzymes with:
+List built-in restriction enzymes with:
 
 ```bash
 cifi enzymes
@@ -367,14 +535,14 @@ CiFi read
 └────────────┴─────────┴────────────────┴───────────┘
 ```
 
-`cifi digest` identifies the restriction-enzyme sites and performs an **in-silico digestion**:
+`cifi digest` identifies restriction-enzyme sites and performs an **in-silico digestion**:
 
 ```text
 A          B          C          D
 1850 bp    720 bp     2300 bp    1100 bp
 ```
 
-It then generates **all pairwise combinations of segments from the same CiFi read**:
+It then generates **all pairwise combinations of retained segments from the same CiFi read**:
 
 ```text
 A ─ B
@@ -400,7 +568,7 @@ For example:
 |                        10 |              45 |
 |                        17 |             136 |
 
-The resulting contacts are written as synchronized R1 and R2 FASTQ files.
+The contacts can be represented either as paired R1/R2 FASTQ records or reconstructed after mapping the unique segments.
 
 ---
 
@@ -408,7 +576,9 @@ The resulting contacts are written as synchronized R1 and R2 FASTQ files.
 
 The generated R1 and R2 records are **not fixed-length reads** like conventional Illumina Hi-C reads.
 
-Each mate represents one recovered CiFi segment. Because different segments can have different lengths, the two mates can also have different lengths:
+Each mate represents one recovered CiFi segment.
+
+Because different segments have different lengths, the two mates can also have different lengths:
 
 ```text
 Pair 1
@@ -422,18 +592,257 @@ R2 = Segment C = 2300 bp
 
 This is expected.
 
-What is synchronized between the two FASTQ files is the **pairing**, not the sequence length:
+What is synchronized between R1 and R2 is the **pairing**, not sequence length.
+
+Corresponding R1 and R2 records have the same read name, remain in the same order, and represent two segments originating from the same CiFi read.
+
+---
+
+# Unique segments and native contact reconstruction
+
+## Two representations of the same CiFi contacts
+
+A CiFi read with `n` retained segments contains:
 
 ```text
-sample_R1.fastq.gz       sample_R2.fastq.gz
-
-pair_0001                pair_0001
-pair_0002                pair_0002
-pair_0003                pair_0003
-   ...                       ...
+n(n-1)/2
 ```
 
-Corresponding R1 and R2 records have the **same read name**, remain in the same order, and represent two segments originating from the same CiFi read.
+pairwise contacts.
+
+`cifi digest` can represent those data in two ways:
+
+| Output                | Representation                                                | Typical consumer                          |
+| --------------------- | ------------------------------------------------------------- | ----------------------------------------- |
+| R1/R2 FASTQ           | every pair explicitly written; segments repeated across pairs | hifiasm `--h1/--h2`, paired-contact tools |
+| unique segments FASTQ | every retained segment written once                           | minimap2 → `cifi contacts` → YaHS         |
+
+hifiasm requires paired reads, so R1/R2 remain useful.
+
+For scaffolding, however, repeatedly mapping the same segment is unnecessary.
+
+A read with `n` segments requires:
+
+```text
+n(n-1)
+```
+
+mapped FASTQ records through the pair-expanded route, because every contact contains two mates.
+
+The unique-segment route requires only:
+
+```text
+n
+```
+
+mapped records.
+
+For example:
+
+| Segments | Contacts | Pair-route records mapped | Unique segments mapped |
+| -------: | -------: | ------------------------: | ---------------------: |
+|        4 |        6 |                        12 |                      4 |
+|       10 |       45 |                        90 |                     10 |
+|       17 |      136 |                       272 |                     17 |
+
+The intended scaffolding path is therefore:
+
+```text
+CiFi
+ │
+ └─ cifi digest
+      ├─ R1/R2 ───────────────────────────────► hifiasm
+      │
+      └─ unique segments
+              │
+              ▼
+         minimap2 map-hifi
+              │
+              ▼
+        samtools sort -n
+              │
+              ▼
+         cifi contacts
+              │
+              ▼
+              BED
+              │
+              ▼
+             YaHS
+```
+
+---
+
+## Segment names
+
+Each unique segment is named after its original CiFi read with a toolkit-owned suffix:
+
+```text
+<original_read_name>__CIFI_SEG__<k>
+```
+
+`k` is the 1-based index of the restriction-defined span occupied by that segment.
+
+Dropped spans leave gaps rather than causing the retained segments to be renumbered.
+
+For example, if the second span is removed because it is too short:
+
+```text
+read123__CIFI_SEG__1
+read123__CIFI_SEG__3
+read123__CIFI_SEG__4
+```
+
+This preserves the segment's original position within the digested CiFi molecule.
+
+The suffix is parsed from the right, so normal `/`, `:`, and `_` characters in the original read name are supported.
+
+The original read name must not itself contain:
+
+```text
+__CIFI_SEG__
+```
+
+Segment names survive FASTQ → SAM/BAM unchanged and allow `cifi contacts` to reconstruct which alignments originated from the same CiFi molecule.
+
+---
+
+## Mapping unique segments
+
+Recommended mapping:
+
+```bash
+minimap2 -t 32 \
+    -ax map-hifi \
+    --secondary=no \
+    --no-hash-name \
+    assembly.fa \
+    sample.segments.fastq.gz \
+  | samtools sort -n -@ 8 \
+      -o sample.segments.ns.bam
+```
+
+### Why `map-hifi`?
+
+CiFi segments are derived from PacBio HiFi reads, so the HiFi preset is appropriate for their base-accuracy profile.
+
+### Why `--secondary=no`?
+
+The standard scaffolding route uses one primary alignment for each segment.
+
+### Why `--no-hash-name`?
+
+minimap2 may otherwise use the query name when breaking ties between equally scoring alignments.
+
+Because pair-expanded and unique-segment representations use different query names for the same sequence, name-dependent tie breaking can lead to different placements for ambiguous segments.
+
+`--no-hash-name` removes that unnecessary representation-dependent behavior.
+
+---
+
+## Alignment filtering
+
+For every CiFi molecule, `cifi contacts` keeps segments whose **primary** alignment is mapped with MAPQ at or above `-q`.
+
+It then emits every unordered pair among those usable segments.
+
+Specifically:
+
+* unmapped records are ignored
+* secondary records are ignored
+* supplementary records are ignored
+* segments below the MAPQ threshold are ignored
+* segments from different CiFi molecules are never paired
+* a molecule with fewer than two usable segments produces no contacts
+* every unordered contact is emitted exactly once
+
+The default `cifi contacts` MAPQ threshold is:
+
+```text
+1
+```
+
+For the recommended YaHS workflow:
+
+```text
+cifi contacts -q 1
+        ↓
+      YaHS -q 0
+```
+
+so MAPQ filtering occurs once.
+
+---
+
+## BED output
+
+BED is the **recommended contact representation for CiFi scaffolding with YaHS**.
+
+Generate it with:
+
+```bash
+cifi contacts sample.segments.ns.bam \
+    --format bed \
+    -q 1 \
+    -o sample.contacts.bed
+```
+
+Each contact is represented by **two consecutive BED records**, one for each mapped CiFi segment.
+
+Conceptually:
+
+```text
+contigA    startA    endA    pair_name    mapqA
+contigB    startB    endB    pair_name    mapqB
+```
+
+The two records share the same `pair_name`.
+
+Unlike a fixed-read-length representation, BED preserves the actual genomic alignment span of each CiFi segment:
+
+```text
+segment A = 350 bp
+segment B = 1,800 bp
+segment C = 5,200 bp
+```
+
+This is useful for CiFi because restriction-defined segments are naturally variable in length.
+
+The BED can be supplied directly to YaHS:
+
+```bash
+yahs \
+    -q 0 \
+    --no-contig-ec \
+    -o sample.yahs \
+    assembly.fa \
+    sample.contacts.bed
+```
+
+---
+
+## PA5 output
+
+PA5 is also available when a point-like paired-contact representation is desired:
+
+```bash
+cifi contacts sample.segments.ns.bam \
+    --format pa5 \
+    -q 1 \
+    -o sample.contacts.pa5
+```
+
+Each PA5 row contains:
+
+```text
+pair_name  contig1  pos1  contig2  pos2  mapq1  mapq2
+```
+
+The position is the **0-based midpoint of the alignment**.
+
+PA5 represents each segment as a single genomic position rather than preserving its complete alignment span.
+
+For CiFi scaffolding, BED is therefore preferred when using YaHS.
 
 ---
 
@@ -449,7 +858,7 @@ By default, a CiFi read must produce at least:
 
 after processing.
 
-Change this with:
+Change this using:
 
 ```text
 -m
@@ -500,7 +909,7 @@ cifi digest reads.bam \
     -o sample
 ```
 
-The threshold applies to the **sequence actually emitted into R1 or R2**, after any requested overhang stripping.
+The threshold applies to the **sequence actually emitted into R1/R2 and the unique-segment output**, after requested overhang stripping.
 
 Therefore:
 
@@ -508,7 +917,7 @@ Therefore:
 --min-segment-len 60
 ```
 
-guarantees that neither emitted mate is shorter than 60 bp.
+guarantees that emitted segments are at least 60 bp long.
 
 ---
 
@@ -522,27 +931,9 @@ By default:
 
 is enabled.
 
-The restriction-site remnant is removed from segments that begin at an in-silico cut before those segments are paired.
+The restriction-site remnant is removed from segments that begin at an in-silico cut before those segments are paired or written to `--segments-out`.
 
 Importantly, stripping is performed on the **segment itself**, not specifically on R1 or R2.
-
-For example:
-
-```text
-Segment C
-    ↓
-overhang stripped
-    ↓
-processed Segment C
-```
-
-Every pair containing Segment C then uses the same processed sequence:
-
-```text
-A ─ C
-B ─ C
-C ─ D
-```
 
 To retain the restriction-site remnant:
 
@@ -574,17 +965,7 @@ cifi digest reads.bam \
 
 Overhang stripping and R2 reverse complementation are **independent options**.
 
-For example:
-
-```bash
-cifi digest reads.bam \
-    -e HindIII \
-    --strip-overhang \
-    --revcomp-r2 \
-    -o sample
-```
-
-first processes the segment boundary and then reverse-complements R2.
+The unique `--segments-out` file always represents the processed segment itself in native read orientation; the R2-specific reverse-complement option does not alter the unique segment output.
 
 ---
 
@@ -604,9 +985,9 @@ R2
 TGCA...
 ```
 
-Pair identity therefore comes directly from the matching FASTQ record names.
+Pair identity therefore comes directly from matching FASTQ record names.
 
-R1 and R2 do **not** use different `/1` and `/2` suffixes.
+R1 and R2 do **not** use separate `/1` and `/2` suffixes.
 
 ---
 
@@ -632,7 +1013,7 @@ It affects reporting/statistics only; segmentation and generated paired contacts
 
 `cifi digest` generates a detailed HTML report by default.
 
-The report includes information about both the original CiFi data and the resulting paired contacts.
+The report includes information about both the original CiFi reads and the generated paired contacts.
 
 ### Input reads
 
@@ -683,6 +1064,8 @@ input bases
     └── bases represented in emitted R1/R2 contacts
 ```
 
+When `--segments-out` is used, the command also reports the number of unique retained segments written.
+
 ---
 
 # Restriction enzymes
@@ -701,7 +1084,7 @@ Built-in enzymes:
 
 # Custom restriction sites
 
-Custom recognition sites can be supplied with:
+Custom recognition sites can be supplied using:
 
 ```text
 --site
@@ -737,7 +1120,9 @@ SAM
 CRAM
 ```
 
-For aligned BAM filtering, use:
+`cifi contacts` accepts a name-sorted BAM containing mapped CiFi segments.
+
+For aligned paired-contact filtering, use:
 
 ```text
 cifi filter
@@ -753,35 +1138,41 @@ cifi filter
                                 ▼
                             cifi qc
                                 │
-                       library assessment
-                                │
                                 ▼
                           cifi digest
                                 │
-                     in-silico digestion
-                                │
-                         CiFi segments
-                                │
-                    all pairwise contacts
-                                │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-              R1 FASTQ                  R2 FASTQ
-                    └───────────┬───────────┘
-                                │
-                         paired contacts
-                                │
-                ┌───────────────┴───────────────┐
-                ▼                               ▼
-             hifiasm                         mapping
-       phasing / assembly                       │
-                                                ▼
-                                           cifi filter
-                                                │
-                                      ┌─────────┴─────────┐
-                                      ▼                   ▼
-                                 contact maps         scaffolding
+               ┌────────────────┴────────────────┐
+               ▼                                 ▼
+        R1/R2 paired FASTQ               unique segments
+               │                         (--segments-out)
+               ▼                                 │
+            hifiasm                              ▼
+      phasing / assembly                    minimap2
+                                                  │
+                                                  ▼
+                                          samtools sort -n
+                                                  │
+                                                  ▼
+                                           cifi contacts
+                                                  │
+                                                  ▼
+                                                 BED
+                                                  │
+                                                  ▼
+                                                YaHS
+                                                  │
+                                                  ▼
+                                             scaffolds
 ```
+
+The same CiFi digestion therefore provides:
+
+```text
+pair-expanded contacts → hifiasm
+unique mapped segments → YaHS scaffolding
+```
+
+without requiring the same segment to be aligned repeatedly for every pairwise combination.
 
 ---
 
@@ -801,24 +1192,44 @@ Two segments from the same CiFi read emitted together as corresponding R1 and R2
 
 ### Contact
 
-The pairwise relationship represented by those two segments.
+The pairwise relationship represented by two CiFi segments.
 
 A CiFi read containing multiple segments therefore represents multiple pairwise contacts.
+
+### Unique segment
+
+A retained segment written once by:
+
+```text
+cifi digest --segments-out
+```
+
+and named:
+
+```text
+<read>__CIFI_SEG__<k>
+```
+
+Its mapped coordinate is used by `cifi contacts` to reconstruct the molecule's pairwise contacts.
 
 ---
 
 # Citation
 
-If you use `cifi-toolkit` please cite:
+If you use `cifi-toolkit`, please cite:
 
-*Single-library chromosome-scale diploid assemblies of vole genomes resolve a species-specific duplication implicated in pair bonding.*
-**Cell Genomics. 2026; 101336.**
+**Single-library chromosome-scale diploid assemblies of vole genomes resolve a species-specific duplication implicated in pair bonding.**
+
+*Cell Genomics.* 2026; 101336.
+
 https://doi.org/10.1016/j.xgen.2026.101336
 
 For the CiFi method, please also cite:
 
-*CiFi: accurate long-read chromosome conformation capture with low-input requirements.*
-**Nature Communications. 2025.**
+**CiFi: accurate long-read chromosome conformation capture with low-input requirements.**
+
+*Nature Communications.* 2025.
+
 https://doi.org/10.1038/s41467-025-66918-y
 
 ---
