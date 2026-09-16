@@ -26,6 +26,7 @@
 #include "io/table_writer.hpp"
 #include "filter/bam_filter.hpp"
 #include "contacts/contacts.hpp"
+#include "molecules/molecules.hpp"
 
 extern "C" {
 #include "kseq.h"
@@ -513,6 +514,32 @@ cifi::ProcessingResult process_reads_custom(
                        command, version, config, gzip_output);
 }
 
+// Molecules: the long table from name-grouped segment alignments
+cifi::MoleculesResult extract_molecules(
+    const std::string& input_path,
+    const std::string& output_path,
+    const std::string& table = "",
+    const std::string& candidates = "all",
+    int threads = 4,
+    const std::string& command = "",
+    const std::string& version = ""
+) {
+    cifi::MoleculesConfig config;
+    config.table = table;
+    config.threads = threads;
+    config.command = command;
+    config.version = version;
+    if (candidates == "all") {
+        config.primary_only = false;
+    } else if (candidates == "primary") {
+        config.primary_only = true;
+    } else {
+        throw std::invalid_argument("Unknown candidates choice: " + candidates +
+                                    " (expected all or primary)");
+    }
+    return cifi::extract_molecules(input_path, output_path, config);
+}
+
 // Contacts from mapped unique segments
 cifi::ContactsResult reconstruct_contacts(
     const std::string& input_path,
@@ -773,4 +800,40 @@ NB_MODULE(_core, m) {
           "PA5 position for an alignment spanning [pos0, end0) in 0-based\n"
           "coordinates: the midpoint yahs computes for a name-sorted BAM.");
 
+    // The long molecule table
+    nb::class_<cifi::MoleculesResult>(m, "MoleculesResult")
+        .def_ro("records_seen", &cifi::MoleculesResult::records_seen)
+        .def_ro("molecules", &cifi::MoleculesResult::molecules)
+        .def_ro("segments", &cifi::MoleculesResult::segments)
+        .def_ro("rows_written", &cifi::MoleculesResult::rows_written)
+        .def_ro("primary_mapped", &cifi::MoleculesResult::primary_mapped)
+        .def_ro("unmapped", &cifi::MoleculesResult::unmapped)
+        .def_ro("secondary", &cifi::MoleculesResult::secondary)
+        .def_ro("supplementary", &cifi::MoleculesResult::supplementary)
+        .def_ro("duplicate_primary", &cifi::MoleculesResult::duplicate_primary)
+        .def_ro("segments_with_candidates", &cifi::MoleculesResult::segments_with_candidates)
+        .def_ro("molecules_with_candidates", &cifi::MoleculesResult::molecules_with_candidates)
+        .def_ro("rows_dropped_candidates", &cifi::MoleculesResult::rows_dropped_candidates)
+        .def_ro("table_molecules", &cifi::MoleculesResult::table_molecules)
+        .def_ro("table_segments", &cifi::MoleculesResult::table_segments)
+        .def_ro("table_segments_missing_from_bam",
+                &cifi::MoleculesResult::table_segments_missing_from_bam)
+        .def_ro("table_molecules_missing_from_bam",
+                &cifi::MoleculesResult::table_molecules_missing_from_bam)
+        .def_ro("sort_order", &cifi::MoleculesResult::sort_order)
+        .def_ro("group_order", &cifi::MoleculesResult::group_order);
+
+    m.def("extract_molecules", &extract_molecules,
+          nb::arg("input_path"),
+          nb::arg("output_path"),
+          nb::arg("table") = "",
+          nb::arg("candidates") = "all",
+          nb::arg("threads") = 4,
+          nb::arg("command") = "",
+          nb::arg("version") = "",
+          "Write the long molecule table (bgzip TSV): one row per segment and\n"
+          "alignment record of a name-grouped BAM of digested segments. table:\n"
+          "the segments table of the digest, for the read coordinates; candidates\n"
+          "'all' or 'primary' (drops secondary and supplementary rows).\n"
+          "The output appears under its name only once complete.");
 }

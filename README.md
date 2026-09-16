@@ -23,6 +23,7 @@ CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. 
   * [`cifi qc`](#cifi-qc)
   * [`cifi digest`](#cifi-digest)
   * [`cifi contacts`](#cifi-contacts)
+  * [`cifi molecules`](#cifi-molecules)
   * [`cifi filter`](#cifi-filter)
   * [`cifi enzymes`](#cifi-enzymes)
 * [How CiFi reads become paired contacts](#how-cifi-reads-become-paired-contacts)
@@ -37,6 +38,7 @@ CiFi combines chromosome conformation capture (3C) with PacBio HiFi sequencing. 
 
   * [Two indices](#two-indices)
   * [The segments table](#the-segments-table)
+  * [The long molecule table](#the-long-molecule-table)
 * [Digest behavior and options](#digest-behavior-and-options)
 
   * [Minimum number of segments](#minimum-number-of-segments)
@@ -67,6 +69,7 @@ Unlike conventional paired-end Hi-C, a CiFi read can contain **multiple interact
 | `cifi qc`         | Characterize CiFi reads and estimate digestion/contact yield            |
 | `cifi digest`     | Digest CiFi reads in silico; paired-end contacts, unique segments and the segments table |
 | `cifi contacts`   | Reconstruct pairwise contacts from mapped unique segments (YaHS BED/PA5) |
+| `cifi molecules`  | The long molecule table: every segment of every read with its alignments |
 | `cifi filter`     | Filter aligned paired contacts by mapping status and MAPQ               |
 | `cifi enzymes`    | List built-in restriction enzymes and cut positions                     |
 
@@ -89,11 +92,13 @@ R1 FASTQ + R2 FASTQ           unique segments FASTQ
        │        phasing / assembly    ▼
        ▼                        map once (minimap2)
      mapping                          │
-       │                              ▼
-       ▼                        cifi contacts
-   cifi filter                        │
-       │                              ▼
-       ├──────► contact maps     YaHS BED ──► scaffolding
+       │                 ┌────────────┴────────────┐
+       ▼                 ▼                         ▼
+   cifi filter     cifi contacts            cifi molecules
+       │                 │                  (+ segments table)
+       │                 ▼                         │
+       ├──────► contact maps                       ▼
+       │           YaHS BED ──► scaffolding   the long molecule table
        └──────► scaffolding
 ```
 
@@ -404,6 +409,57 @@ Options:
 --no-json       skip the statistics file
 --no-report     skip the HTML report
 ```
+
+---
+
+## `cifi molecules`
+
+`cifi molecules` writes the long molecule table from alignments of the
+unique segments: one row per segment and alignment record, molecules in BAM
+order, segments in read order. It takes the same name-grouped BAM as
+`cifi contacts` and, optionally, the segments table of the digest:
+
+```bash
+cifi digest sample.cifi.bam -e HindIII -o sample --gzip \
+    --segments-out sample.segments.fastq.gz \
+    --segments-table sample.segments.tsv.gz
+
+minimap2 -t 32 -ax map-hifi --no-hash-name assembly.fa sample.segments.fastq.gz \
+    | samtools sort -n -@ 8 -o sample.segments.ns.bam
+
+cifi molecules sample.segments.ns.bam -o sample.molecules.tsv.gz \
+    --table sample.segments.tsv.gz
+```
+
+This produces:
+
+```text
+sample.molecules.tsv.gz
+sample.molecules_molecules_stats.json
+```
+
+Secondary and supplementary records may be present in the BAM (they become
+rows of their own); unmapped segments appear as unmapped rows. The header
+checks are those of `cifi contacts`: coordinate order is refused, and a read
+whose segments turn out not to be contiguous stops the run. The output takes
+its final name only once complete.
+
+Options:
+
+```text
+--table         the segments table of the digest, for spans_total, read_length
+                and the read coordinates; held in memory, about 55 bytes per
+                segment plus a per-molecule index (86 MB resident for
+                1.1 M segments in 200,000 molecules, against 28 MB without
+                the table)
+--candidates    all (default) or primary: primary drops the secondary and
+                supplementary rows
+-t, --threads   BAM decompression threads                     [default: 4]
+--no-json       skip the statistics file
+--quiet         no terminal output
+```
+
+The format is specified under [The long molecule table](#the-long-molecule-table).
 
 ---
 
@@ -775,23 +831,30 @@ reports peak memory.
 
 A CiFi read is one HiFi concatemer of restriction-defined segments: an
 ordered, multi-way contact molecule. The pairs of `cifi digest` and the
-contacts of `cifi contacts` reduce it to pairwise relations; the segments
-table described here keeps the molecule whole, as a data file: which
-segments it had in which order, which cut spans were dropped and where each
-segment sat in the read. It is a bgzip-compressed TSV file (readable with
-any gzip reader, and block-addressable by htslib).
+contacts of `cifi contacts` reduce it to pairwise relations; the tables
+described here keep the molecule whole, as data files: which segments it
+had in which order, which cut spans were dropped, where each segment sat in
+the read, and every alignment candidate of every segment.
 
-The header layout is `##key=value` metadata lines, one item each, in a
+The **long molecule table** written by `cifi molecules` is the canonical
+form: one row per (segment, alignment record); anything derived from it is
+never a second source of truth. Both tables are bgzip-compressed TSV files
+(readable with any gzip reader, and block-addressable by htslib).
+
+The two native formats (the segments table and the long molecule table)
+share one header layout: `##key=value` metadata lines, one item each, in a
 fixed order, then the `#columns:` line naming the columns, then the data
-rows. The vocabulary is fixed and given below; a reader splits each `##`
-line on its first `=`. The first four keys are `cifi_format`, naming the
-format, `format_version`, its layout version (`1`), `tool_version`, the
-cifi release, and `command`, the command line that wrote the file. The
-remaining keys state the conventions of the columns (coordinate systems,
-index meanings, the codes of a column). Nothing in the header varies
-between two runs of the same command: no timestamp, no host.
+rows. The vocabulary of each format is fixed and given below; a reader
+splits each `##` line on its first `=`. The first four keys are the same in
+both: `cifi_format` names the format, `format_version` its layout version
+(`1`), `tool_version` the cifi release, `command` the command line that
+wrote the file. The remaining keys state the conventions of the columns
+(coordinate systems, index meanings, the codes of a column). Nothing in the
+header varies between two runs of the same command: no timestamp, no host.
 
-`cifi digest`'s statistics file repeats the provenance: it carries
+Every statistics file of these commands repeats the provenance: `format`
+(`{name, version}`), `cifi_version`, `command`, the input paths, the
+parameters and the record counts. `cifi digest`'s statistics file carries
 `formats`, keyed by output (`segments_table`), and gains `command` only when
 the table was requested; the file is otherwise unchanged.
 
@@ -857,6 +920,107 @@ terminal  enzyme  cut_offset
 
 `--gzip` does not change the table; it is always bgzip. Reads that failed
 `--min-segments` have no rows.
+
+## The long molecule table
+
+`cifi molecules` writes one row per (segment, alignment record) of a
+name-grouped BAM of segment alignments.
+
+Header:
+
+```text
+##cifi_format=molecules
+##format_version=1
+##tool_version=<cifi version>
+##command=<command line>
+##canonical=true
+##read_coordinates=0-based-half-open
+##reference_coordinates=0-based-half-open
+##span_index=1-based-original-digest-span
+##retained_index=1-based-dense-retained-order
+##aln=P-primary,S-secondary,L-supplementary,U-unmapped
+##rank=0-primary,then-AS-descending
+##segments_table=<the --table path, or none>
+#columns: <the columns below>
+```
+
+Columns:
+
+```text
+molecule_id  span_index  retained_index  segment_count  spans_total  read_length
+read_start  read_end  seg_len  ref  ref_start  ref_end  strand  mapq  aln  rank
+as  nm  qstart  qend  mlen  blen  cigar
+```
+
+* `segment_count`: the segments of the molecule (equal to `segments_kept`
+  of the segments table). `spans_total`, `read_length`, `read_start`,
+  `read_end`: from the segments table, `.` without `--table`.
+  `retained_index`: dense 1..N over the distinct `span_index` values of
+  the molecule, in increasing `span_index` order. It is computed from the
+  segments present, so it equals the digest's `retained_index` only when
+  every retained segment of the molecule is in the BAM: without `--table`,
+  a BAM filtered before `cifi molecules` (segments removed rather than left
+  unmapped) renumbers the survivors, and `segment_count` shrinks with them.
+  With `--table` the missing segments are completed as unmapped rows and
+  the numbering is the digest's.
+* `seg_len`: the full segment length, clips included (from the CIGAR's
+  M/=/X, I, S and H bases, or from the table). One value per segment.
+* `ref`, `ref_start`, `ref_end`: 0-based, half-open; `strand`: `+`/`-`;
+  `mapq`.
+* `aln`: `P` primary, `S` secondary, `L` supplementary, `U` unmapped. An
+  unmapped row has `.` in every alignment column, `*` as CIGAR and rank 0.
+* `rank`: 0 for the primary record; the other records of the segment follow
+  as 1, 2, ... ordered by `AS` descending, then reference interval (contig,
+  start, end), forward strand before reverse, then the CIGAR string, and
+  only then input order, so records that differ in anything the row shows
+  rank the same whatever order the BAM had them in. A second primary record
+  for a segment already seen (a concatenation of alignments) is ranked
+  among the others and counted as an anomaly.
+* `as`, `nm`: the `AS` and `NM` tags, or `.`.
+* `qstart`, `qend`: the aligned query interval, 0-based half-open, in the
+  orientation of the segment as sequenced: soft and hard clips accounted
+  for, and swapped for `-` strand records, exactly as PAF has them.
+* `mlen`: matching bases, `M/=/X bases - mismatches`, where the mismatches
+  are `NM - I bases - D bases` (or the `X` bases of an extended CIGAR;
+  zero without `NM`), floored at 0. `blen`: the alignment block length,
+  `M/=/X + I + D`, less the ambiguous bases when the record carries
+  minimap2's `nn` tag (minimap2 counts an `N` as a mismatch in `NM` and
+  leaves it out of its block length). These are PAF columns 10 and 11 as
+  minimap2 writes them; `paftools.js sam2paf` computes the same `mlen` and,
+  ignoring `nn`, a `blen` larger by the ambiguous bases.
+* `cigar`: as in the BAM, so a PAF or SAM line can be regenerated.
+
+Rows are ordered by molecule in BAM order, within a molecule by
+`retained_index`, within a segment by `rank`. `--candidates primary` leaves
+out the `S` and `L` rows. The PAF equivalence, per segment, is
+
+```text
+qname   qlen    qstart qend strand tname tlen            tstart    tend    mlen blen mapq
+= segment seg_len qstart qend strand ref   <from the .fai> ref_start ref_end mlen blen mapq
+```
+
+and, per molecule, with the read coordinates of the table,
+
+```text
+= molecule_id read_length read_start+qstart read_start+qend strand ref <from the .fai> ref_start ref_end mlen blen mapq
+```
+
+(the test suite regenerates the segment PAF from the table and compares it
+with minimap2's own `-c` output for the same alignments, and checks the
+molecule PAF against the read sequences).
+
+With `--table`, the BAM's molecules and segments are checked against the
+table: a BAM segment or molecule absent from the table, or a segment whose
+length differs between the two, is an error naming the segment. A table
+segment absent from the BAM while its molecule is present is written as a
+`U` row so the molecule stays complete, and counted
+(`table_segments_missing_from_bam`); a table molecule with no record at all
+is only counted (`table_molecules_missing_from_bam`). The statistics file
+also carries records by type, molecules, segments, rows written, segments
+with more than one record and the molecules that have such a segment,
+with the provenance of the table: `format` (`{name: molecules, version:
+1}`), `command`, `cifi_version` and the input paths (the BAM and, under
+`input.table`, the segments table).
 
 ---
 
@@ -1239,7 +1403,7 @@ read's contacts.
 ### Molecule
 
 The CiFi read seen as an ordered set of segments: what the segments table
-describes.
+describes and the long molecule table puts back together after alignment.
 
 ---
 

@@ -1,15 +1,14 @@
 #include "contacts.hpp"
 #include "../core/segment_name.hpp"
+#include "../io/grouped_bam.hpp"
 #include "../io/hts_handles.hpp"
 #include "../io/writer.hpp"
 
 #include <htslib/hts.h>
-#include <htslib/kstring.h>
 #include <htslib/sam.h>
 #include <parallel_hashmap/phmap.h>
 
 #include <algorithm>
-#include <deque>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -43,31 +42,6 @@ struct ReadGroup {
         seen.clear();
         primaries.clear();
     }
-};
-
-// The last few finished reads. A BAM that is grouped only in stretches, or a
-// coordinate-sorted one missing its SO tag, brings a read back after its
-// group was already flushed; that would silently lose contacts, so it is an
-// error. Fixed size: a sanity net, not an index of the file.
-class RecentReads {
-public:
-    explicit RecentReads(size_t capacity) : capacity_(capacity) {}
-
-    bool contains(const std::string& name) const { return set_.count(name) > 0; }
-
-    void push(const std::string& name) {
-        order_.push_back(name);
-        set_.insert(name);
-        if (order_.size() > capacity_) {
-            set_.erase(order_.front());
-            order_.pop_front();
-        }
-    }
-
-private:
-    size_t capacity_;
-    std::deque<std::string> order_;
-    phmap::flat_hash_set<std::string> set_;
 };
 
 void append_uint(std::string& s, uint64_t v) {
@@ -187,23 +161,10 @@ ContactsResult reconstruct_contacts(
 
     // Only a name-grouped input keeps a read's segments together; refuse the
     // one order that is known to scatter them rather than stream through it
-    // and emit a fraction of the contacts.
-    kstring_t tag = KS_INITIALIZE;
-    if (sam_hdr_find_tag_hd(hdr.get(), "SO", &tag) == 0 && ks_len(&tag) > 0) {
-        result.sort_order.assign(ks_str(&tag), ks_len(&tag));
-    }
-    // minimap2 declares its own grouping as SO:unsorted GO:query; the caller
-    // needs both tags to tell a grouped input from an undeclared one.
-    if (sam_hdr_find_tag_hd(hdr.get(), "GO", &tag) == 0 && ks_len(&tag) > 0) {
-        result.group_order.assign(ks_str(&tag), ks_len(&tag));
-    }
-    ks_free(&tag);
-    if (result.sort_order == "coordinate") {
-        throw std::runtime_error(
-            input_path + " is sorted by coordinate; cifi contacts needs the segments "
-            "of each read grouped together. Sort by name first: "
-            "samtools sort -n -o segments.ns.bam " + input_path);
-    }
+    // and emit a fraction of the contacts. The caller needs both tags to
+    // tell a grouped input from an undeclared one.
+    read_group_order(hdr.get(), input_path, "cifi contacts", result.sort_order,
+                     result.group_order);
 
     TextWriter out(output_path);
     ReadGroup group;

@@ -38,6 +38,7 @@ nanobind_add_module(
     src/cifi_cpp/io/table_writer.cpp
     src/cifi_cpp/filter/bam_filter.cpp
     src/cifi_cpp/contacts/contacts.cpp
+    src/cifi_cpp/molecules/molecules.cpp
 )
 
 target_include_directories(_core PRIVATE 

@@ -35,6 +35,7 @@ def _command_line():
 # for digest, which can write two).
 TABLE_FORMATS = {
     "segments": {"name": "segments", "version": 1},
+    "molecules": {"name": "molecules", "version": 1},
 }
 
 
@@ -1152,6 +1153,160 @@ def contacts_cmd(input_bam, output, output_format, mapq, threads, report, write_
         except Exception as e:
             if not quiet:
                 click.echo(f"\nWarning: Report failed: {e}", err=True)
+
+    if not quiet:
+        click.echo("\nOutput files:")
+        for f in output_files:
+            click.echo(f"  {f}")
+
+
+def _strip_table_suffix(path):
+    """Prefix for the side files of a table output."""
+    for suffix in (".tsv.gz", ".tsv", ".txt.gz", ".txt", ".porec.gz", ".porec", ".paf.gz",
+                   ".paf", ".gz"):
+        if path.endswith(suffix):
+            return path[:-len(suffix)]
+    return path
+
+
+@main.command("molecules")
+@click.argument("input_bam", type=click.Path(exists=True))
+@click.option("-o", "--output", required=True,
+              help="Output long molecule table (bgzip TSV, name it .tsv.gz)")
+@click.option("--table", "segments_table", type=click.Path(exists=True), default=None,
+              help="The segments table of the digest (--segments-table), for spans_total, "
+                   "read_length and the read coordinates; held in memory")
+@click.option("--candidates", type=click.Choice(["all", "primary"]), default="all",
+              show_default=True,
+              help="Which alignment records become rows: all, or primary only "
+                   "(drops secondary and supplementary records)")
+@click.option("-t", "--threads", default=4, show_default=True,
+              help="Number of threads for BAM decompression")
+@click.option("--json/--no-json", "write_json", default=True, show_default=True,
+              help="Write JSON statistics file")
+@click.option("--quiet", is_flag=True, help="Suppress terminal output")
+def molecules_cmd(input_bam, output, segments_table, candidates, threads, write_json, quiet):
+    """Write the long molecule table from mapped unique segments.
+
+    INPUT_BAM holds alignments of the segments written by
+    'cifi digest --segments-out', grouped by read name (samtools sort -n);
+    secondary, supplementary and unmapped records may be present. The
+    table has one row per segment and alignment record:
+
+    \b
+        molecule_id span_index retained_index segment_count spans_total
+        read_length read_start read_end seg_len ref ref_start ref_end
+        strand mapq aln rank as nm qstart qend mlen blen cigar
+
+    span_index is the digest's cut-span index (the k of the segment name,
+    with gaps); retained_index the dense order of the molecule's segments.
+    aln is P (primary), S (secondary), L (supplementary) or U (unmapped);
+    rank 0 is the primary, the other records follow by score. With --table
+    the read coordinates come from the digest's segments table and a
+    segment the BAM lacks is written as an unmapped row.
+
+    \b
+    Examples:
+        cifi molecules sample.segments.ns.bam -o sample.molecules.tsv.gz \\
+            --table sample.segments.tsv.gz
+        cifi molecules sample.segments.ns.bam -o sample.molecules.tsv.gz --candidates primary
+    """
+    from . import extract_molecules
+
+    try:
+        result = extract_molecules(input_bam, output, segments_table or "", candidates, threads,
+                                   _command_line(), __version__)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    records = {
+        "primary": result.primary_mapped,
+        "secondary": result.secondary,
+        "supplementary": result.supplementary,
+        "unmapped": result.unmapped,
+    }
+    if not quiet:
+        click.echo("\nMolecules Summary")
+        click.echo(f"{'─' * 40}")
+        click.echo(f"Sort order:         {result.sort_order or 'not in header'}")
+        click.echo(f"Alignment records:  {result.records_seen:,}")
+        click.echo(f"  primary mapped:   {records['primary']:,}")
+        click.echo(f"  secondary:        {records['secondary']:,}")
+        click.echo(f"  supplementary:    {records['supplementary']:,}")
+        click.echo(f"  unmapped:         {records['unmapped']:,}")
+        click.echo(f"Molecules:          {result.molecules:,}")
+        click.echo(f"Segments:           {result.segments:,}")
+        click.echo(f"  with >1 record:   {result.segments_with_candidates:,} "
+                   f"in {result.molecules_with_candidates:,} molecules")
+        if segments_table:
+            click.echo(f"Segments table:     {result.table_segments:,} segments "
+                       f"in {result.table_molecules:,} molecules")
+        click.echo(f"Rows written:       {result.rows_written:,}")
+        if candidates == "primary":
+            click.echo(f"  rows left out:    {result.rows_dropped_candidates:,} "
+                       "(secondary, supplementary)")
+        click.echo(f"{'─' * 40}")
+
+    if result.duplicate_primary:
+        click.echo(f"Warning: {result.duplicate_primary:,} further primary records for segments "
+                   "already seen (ranked after the first); is the input a concatenation "
+                   "of several alignments?", err=True)
+    if result.table_segments_missing_from_bam:
+        click.echo(f"Warning: {result.table_segments_missing_from_bam:,} segments of the table "
+                   "have no record in the BAM and were written as unmapped rows", err=True)
+    if result.table_molecules_missing_from_bam:
+        click.echo(f"Warning: {result.table_molecules_missing_from_bam:,} molecules of the "
+                   "table have no record in the BAM and no rows", err=True)
+    if result.sort_order != "queryname" and result.group_order != "query":
+        click.echo("Warning: the header declares neither queryname sort order nor query "
+                   "grouping; segments were taken to be grouped by read as minimap2 "
+                   "emits them.", err=True)
+
+    output_prefix = _strip_table_suffix(output)
+    stats_data = {
+        "cifi_version": __version__,
+        "command": _command_line(),
+        "format": TABLE_FORMATS["molecules"],
+        "timestamp": datetime.now().isoformat(),
+        "input": {
+            "file": os.path.basename(input_bam),
+            "path": os.path.abspath(input_bam),
+            "sort_order": result.sort_order,
+            "group_order": result.group_order,
+            "table": os.path.abspath(segments_table) if segments_table else None,
+        },
+        "parameters": {
+            "table": segments_table,
+            "candidates": candidates,
+            "threads": threads,
+        },
+        "results": {
+            "records_seen": result.records_seen,
+            "records": records,
+            "molecules": result.molecules,
+            "segments": result.segments,
+            "rows_written": result.rows_written,
+            "rows_dropped_candidates": result.rows_dropped_candidates,
+            "duplicate_primary": result.duplicate_primary,
+            "segments_with_candidates": result.segments_with_candidates,
+            "molecules_with_candidates": result.molecules_with_candidates,
+            "table_molecules": result.table_molecules,
+            "table_segments": result.table_segments,
+            "table_segments_missing_from_bam": result.table_segments_missing_from_bam,
+            "table_molecules_missing_from_bam": result.table_molecules_missing_from_bam,
+        },
+        "output": {
+            "file": output,
+        },
+    }
+
+    output_files = [output]
+    if write_json:
+        json_file = f"{output_prefix}_molecules_stats.json"
+        with open(json_file, "w") as f:
+            json.dump(stats_data, f, indent=2)
+        output_files.append(json_file)
 
     if not quiet:
         click.echo("\nOutput files:")
