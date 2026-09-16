@@ -5,7 +5,6 @@
 <p align="center">
   <a href="https://github.com/mydennislab/cifi-toolkit/actions/workflows/ci.yml"><img src="https://github.com/mydennislab/cifi-toolkit/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="https://pypi.org/project/cifi/"><img src="https://img.shields.io/pypi/v/cifi.svg" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/cifi/"><img src="https://img.shields.io/pypi/dm/cifi.svg" alt="PyPI downloads"></a>
   <a href="https://anaconda.org/bioconda/cifi"><img src="https://img.shields.io/conda/vn/bioconda/cifi.svg" alt="Bioconda version"></a>
   <a href="https://anaconda.org/bioconda/cifi"><img src="https://img.shields.io/conda/dn/bioconda/cifi.svg" alt="Bioconda downloads"></a>
   <a href="https://pypi.org/project/cifi/"><img src="https://img.shields.io/pypi/pyversions/cifi.svg" alt="Supported Python versions"></a>
