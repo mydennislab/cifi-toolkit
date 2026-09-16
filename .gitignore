@@ -102,4 +102,5 @@ Thumbs.db
 scratch/
 tmp/
 
+tests/
 internal_docs/
