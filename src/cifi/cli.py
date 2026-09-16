@@ -899,9 +899,29 @@ def filter_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
             click.echo(f"  {f}")
 
 
-def _strip_pa5_suffix(path):
-    """Prefix for the side files of a PA5 output, whatever compression it uses."""
-    for suffix in (".pa5.gz", ".pa5", ".txt.gz", ".txt", ".gz"):
+CONTACTS_FORMATS = ("pa5", "bed")
+
+# What the coordinate columns hold, per format, for the statistics file
+CONTACTS_POSITION = {
+    "pa5": "0-based alignment midpoint, as YaHS derives from a name-sorted BAM",
+    "bed": "0-based alignment start and exclusive end of the primary record",
+}
+
+
+def _contacts_format_from_name(path):
+    """Format yahs itself reads off the name (.bed/.pa5, .gz allowed); None if neither."""
+    name = path.lower()
+    if name.endswith(".gz"):
+        name = name[:-3]
+    for fmt in CONTACTS_FORMATS:
+        if name.endswith("." + fmt):
+            return fmt
+    return None
+
+
+def _strip_contacts_suffix(path):
+    """Prefix for the side files of a contacts output, whatever its extension."""
+    for suffix in (".pa5.gz", ".pa5", ".bed.gz", ".bed", ".txt.gz", ".txt", ".gz"):
         if path.endswith(suffix):
             return path[:-len(suffix)]
     return path
@@ -909,7 +929,12 @@ def _strip_pa5_suffix(path):
 
 @main.command("contacts")
 @click.argument("input_bam", type=click.Path(exists=True))
-@click.option("-o", "--output", required=True, help="Output PA5 file (.gz to compress)")
+@click.option("-o", "--output", required=True,
+              help="Output contacts file (.gz to compress)")
+@click.option("--format", "output_format",
+              type=click.Choice(CONTACTS_FORMATS, case_sensitive=False), default=None,
+              help="Output format; taken from the output name (.bed or .pa5) when "
+                   "omitted, pa5 for any other name")
 @click.option("-q", "--mapq", default=1, show_default=True,
               help="Minimum MAPQ for a segment to take part in contacts")
 @click.option("-t", "--threads", default=4, show_default=True,
@@ -919,8 +944,8 @@ def _strip_pa5_suffix(path):
 @click.option("--json/--no-json", "write_json", default=True, show_default=True,
               help="Write JSON statistics file")
 @click.option("--quiet", is_flag=True, help="Suppress terminal output")
-def contacts_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
-    """Reconstruct pairwise contacts from mapped unique segments (YaHS PA5).
+def contacts_cmd(input_bam, output, output_format, mapq, threads, report, write_json, quiet):
+    """Reconstruct pairwise contacts from mapped unique segments for YaHS.
 
     INPUT_BAM holds alignments of the segments written by
     'cifi digest --segments-out', grouped by read name:
@@ -930,24 +955,37 @@ def contacts_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
             | samtools sort -n -o sample.segments.ns.bam
 
     Every read with k primary mapped segments at or above -q yields the
-    k(k-1)/2 pairs among them, one PA5 row each:
+    k(k-1)/2 pairs among them. Two output formats:
 
     \b
-        pair_name  contig1  pos1  contig2  pos2  mapq1  mapq2
+        pa5  one row per contact, alignment midpoints:
+             pair_name  contig1  pos1  contig2  pos2  mapq1  mapq2
+        bed  two consecutive rows per contact, each segment's aligned span:
+             contig  start  end  pair_name  mapq
 
-    pos is the 0-based midpoint of the alignment, the value YaHS itself
-    derives from a name-sorted BAM. Only primary alignments count; secondary
-    and supplementary records are ignored. Segments of different reads are
-    never paired.
+    YaHS reads either. With PA5 it rebuilds an interval around each point
+    from one global --read-length, which does not fit variable-length CiFi
+    segments; BED hands it the real spans, so it is the format to scaffold
+    with. Only primary alignments count; secondary and supplementary
+    records are ignored. Segments of different reads are never paired.
 
     \b
-    Example:
+    Examples:
+        cifi contacts sample.segments.ns.bam -o sample.bed -q 1
         cifi contacts sample.segments.ns.bam -o sample.pa5 -q 1
     """
     from . import reconstruct_contacts
 
+    named_format = _contacts_format_from_name(output)
+    output_format = (output_format or named_format or "pa5").lower()
+    if named_format and named_format != output_format:
+        # yahs picks the parser by extension unless told --file-type
+        click.echo(f"Warning: writing {output_format.upper()} to a file named "
+                   f".{named_format}; yahs will read it as {named_format.upper()} "
+                   "unless given --file-type", err=True)
+
     try:
-        result = reconstruct_contacts(input_bam, output, mapq, threads)
+        result = reconstruct_contacts(input_bam, output, mapq, threads, output_format)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -964,6 +1002,7 @@ def contacts_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
     if not quiet:
         click.echo("\nContacts Summary")
         click.echo(f"{'─' * 40}")
+        click.echo(f"Output format:      {output_format.upper()}")
         click.echo(f"Sort order:         {result.sort_order or 'not in header'}")
         click.echo(f"Alignment records:  {result.records_seen:,}")
         click.echo(f"Segments:           {result.segments_seen:,} in {result.reads_seen:,} reads")
@@ -992,7 +1031,7 @@ def contacts_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
         click.echo("Warning: the header does not declare queryname sort order; segments "
                    "were taken to be grouped by read as minimap2 emits them.", err=True)
 
-    output_prefix = _strip_pa5_suffix(output)
+    output_prefix = _strip_contacts_suffix(output)
     stats_data = {
         "cifi_version": __version__,
         "timestamp": datetime.now().isoformat(),
@@ -1004,7 +1043,8 @@ def contacts_cmd(input_bam, output, mapq, threads, report, write_json, quiet):
         "parameters": {
             "mapq_threshold": mapq,
             "threads": threads,
-            "position": "0-based alignment midpoint, as YaHS derives from a name-sorted BAM",
+            "output_format": output_format,
+            "position": CONTACTS_POSITION[output_format],
         },
         "results": {
             "records_seen": result.records_seen,

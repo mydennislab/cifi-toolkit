@@ -6,6 +6,23 @@
 
 namespace cifi {
 
+/**
+ * How a contact is written; both forms carry the same pairs and MAPQs.
+ *
+ * PA5 has one row per contact with a point position per segment. yahs
+ * rebuilds an interval around that point from its global --read-length
+ * (link.c, dump_links_from_pa5_file: rl >>= 1 at line 1726, then
+ * [p - rl, p + rl] at 1762-1765), which suits fixed-length Hi-C reads but
+ * not CiFi segments, whose lengths vary by orders of magnitude.
+ *
+ * BED has two consecutive rows per contact, each with the segment's own
+ * aligned span. yahs takes those spans as they are for coverage
+ * (link.c 1614-1621) and derives from them the midpoint PA5 would have
+ * carried (link.c 1633-1634). No read length enters into it, so BED is the
+ * form meant for scaffolding CiFi data.
+ */
+enum class ContactsFormat { PA5, BED };
+
 struct ContactsConfig {
     // Segments under this MAPQ take no part in any contact. 1 follows the
     // CiFi paper and the previous assembly pipeline; cifi filter's default of
@@ -13,6 +30,7 @@ struct ContactsConfig {
     int min_mapq = 1;
     // BAM decompression threads
     int threads = 4;
+    ContactsFormat format = ContactsFormat::PA5;
 };
 
 struct ContactsResult {
@@ -59,10 +77,13 @@ inline uint32_t pa5_position(int64_t pos0, int64_t end0) {
 
 /**
  * Stream a name-grouped BAM of uniquely emitted segments and write every
- * pairwise contact between the usable segments of each read as a PA5 row.
+ * pairwise contact between the usable segments of each read, as one PA5 row
+ * or two BED rows per contact according to config.format.
  *
  * Memory is bounded by the segments of the read currently streaming past;
  * the quadratic expansion happens once per read, at the group boundary.
+ * The output takes its final name only once it is complete; a run that
+ * fails leaves no partial file behind.
  */
 ContactsResult reconstruct_contacts(
     const std::string& input_path,

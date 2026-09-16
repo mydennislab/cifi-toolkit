@@ -388,7 +388,8 @@ def generate_contacts_report(stats_data: Dict[str, Any], output_path: str) -> st
             ["MAPQ Threshold", str(params["mapq_threshold"])],
             ["Threads", str(params["threads"])],
             ["Input sort order", stats_data["input"].get("sort_order") or "not in header"],
-            ["PA5 position", params["position"]],
+            ["Output format", params["output_format"].upper()],
+            ["Coordinates", params["position"]],
         ],
 
         "summary_metrics": [

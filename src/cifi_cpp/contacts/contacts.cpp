@@ -1,5 +1,6 @@
 #include "contacts.hpp"
 #include "../core/segment_name.hpp"
+#include "../io/hts_handles.hpp"
 #include "../io/writer.hpp"
 
 #include <htslib/hts.h>
@@ -9,7 +10,6 @@
 
 #include <algorithm>
 #include <deque>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -18,20 +18,11 @@ namespace cifi {
 
 namespace {
 
-struct HtsFileCloser {
-    void operator()(htsFile* fp) const { if (fp) hts_close(fp); }
-};
-struct HeaderDestroyer {
-    void operator()(sam_hdr_t* h) const { if (h) sam_hdr_destroy(h); }
-};
-struct RecordDestroyer {
-    void operator()(bam1_t* b) const { if (b) bam_destroy1(b); }
-};
-
 struct UsableSegment {
     uint32_t index;   // span index from the QNAME
     int32_t tid;
-    uint32_t pos;     // PA5 position
+    uint32_t start;   // 0-based reference start of the primary alignment
+    uint32_t end;     // exclusive end from the CIGAR (bam_endpos)
     uint8_t mapq;
 };
 
@@ -89,8 +80,54 @@ void append_uint(std::string& s, uint64_t v) {
     while (n) s += tmp[--n];
 }
 
+// PA5 row: pair_name contig1 pos1 contig2 pos2 mapq1 mapq2, one per contact.
+void append_pa5(std::string& line, const std::string& name,
+                const char* contig_a, const UsableSegment& a,
+                const char* contig_b, const UsableSegment& b) {
+    line += name;
+    line += '\t';
+    line += contig_a;
+    line += '\t';
+    append_uint(line, pa5_position(a.start, a.end));
+    line += '\t';
+    line += contig_b;
+    line += '\t';
+    append_uint(line, pa5_position(b.start, b.end));
+    line += '\t';
+    append_uint(line, a.mapq);
+    line += '\t';
+    append_uint(line, b.mapq);
+    line += '\n';
+}
+
+// BED record: contig start end pair_name mapq, two per contact, back to back.
+//
+// This is the shape yahs's BED reader expects (link.c, dump_links_from_bed_file):
+// it holds one record and pairs it with the next only if the names match
+// (lines 1581-1592; is_read_pair in asset.c 175-188 accepts identical names,
+// so no /1 /2 suffix is needed), otherwise the earlier record is dropped
+// and the later one becomes the held record (1652-1660). Columns are read as
+// "%s %u %u %s %hhu" (1585, 1591). The link position is the midpoint
+// s/2 + e/2 + (s&1 && e&1) of the two integers (1633-1634), the same value
+// the PA5 row carries, and [start, end] goes into the coverage track as
+// given (1614-1621); a PA5 input has only the point, so there the interval
+// is manufactured from --read-length (1726, 1762-1765).
+void append_bed(std::string& line, const char* contig, const UsableSegment& s,
+                const std::string& name) {
+    line += contig;
+    line += '\t';
+    append_uint(line, s.start);
+    line += '\t';
+    append_uint(line, s.end);
+    line += '\t';
+    line += name;
+    line += '\t';
+    append_uint(line, s.mapq);
+    line += '\n';
+}
+
 void flush_group(ReadGroup& group, const sam_hdr_t* hdr, TextWriter& out,
-                 ContactsResult& result) {
+                 ContactsFormat format, ContactsResult& result) {
     if (!group.active) return;
     uint64_t n = group.seen.size();
     result.pair_mates_equivalent += n * (n - 1);
@@ -104,26 +141,21 @@ void flush_group(ReadGroup& group, const sam_hdr_t* hdr, TextWriter& out,
     std::sort(group.usable.begin(), group.usable.end(),
               [](const UsableSegment& a, const UsableSegment& b) { return a.index < b.index; });
 
-    std::string line;
+    std::string name, line;
     for (size_t i = 0; i < k; i++) {
         const auto& a = group.usable[i];
         const char* contig_a = sam_hdr_tid2name(hdr, a.tid);
         for (size_t j = i + 1; j < k; j++) {
             const auto& b = group.usable[j];
-            line = contact_name(group.name, a.index, b.index);
-            line += '\t';
-            line += contig_a;
-            line += '\t';
-            append_uint(line, a.pos);
-            line += '\t';
-            line += sam_hdr_tid2name(hdr, b.tid);
-            line += '\t';
-            append_uint(line, b.pos);
-            line += '\t';
-            append_uint(line, a.mapq);
-            line += '\t';
-            append_uint(line, b.mapq);
-            line += '\n';
+            const char* contig_b = sam_hdr_tid2name(hdr, b.tid);
+            name = contact_name(group.name, a.index, b.index);
+            line.clear();
+            if (format == ContactsFormat::BED) {
+                append_bed(line, contig_a, a, name);
+                append_bed(line, contig_b, b, name);
+            } else {
+                append_pa5(line, name, contig_a, a, contig_b, b);
+            }
             out.write(line);
         }
     }
@@ -144,11 +176,11 @@ ContactsResult reconstruct_contacts(
     const std::string& output_path,
     const ContactsConfig& config
 ) {
-    std::unique_ptr<htsFile, HtsFileCloser> fp(hts_open(input_path.c_str(), "r"));
+    HtsFilePtr fp(hts_open(input_path.c_str(), "r"));
     if (!fp) throw std::runtime_error("Cannot open: " + input_path);
     if (config.threads > 1) hts_set_threads(fp.get(), config.threads);
 
-    std::unique_ptr<sam_hdr_t, HeaderDestroyer> hdr(sam_hdr_read(fp.get()));
+    SamHeaderPtr hdr(sam_hdr_read(fp.get()));
     if (!hdr) throw std::runtime_error("Cannot read header: " + input_path);
 
     ContactsResult result;
@@ -171,7 +203,7 @@ ContactsResult reconstruct_contacts(
     TextWriter out(output_path);
     ReadGroup group;
     RecentReads recent(256);
-    std::unique_ptr<bam1_t, RecordDestroyer> b(bam_init1());
+    BamRecordPtr b(bam_init1());
 
     int ret;
     while ((ret = sam_read1(fp.get(), hdr.get(), b.get())) >= 0) {
@@ -179,7 +211,7 @@ ContactsResult reconstruct_contacts(
         auto seg = parse_segment_name(bam_get_qname(b.get()));
 
         if (!group.active || seg.read != group.name) {
-            flush_group(group, hdr.get(), out, result);
+            flush_group(group, hdr.get(), out, config.format, result);
             if (group.active) recent.push(group.name);
             if (recent.contains(seg.read)) {
                 throw std::runtime_error(
@@ -217,12 +249,13 @@ ContactsResult reconstruct_contacts(
         }
         result.usable_segments++;
         group.usable.push_back({seg.index, b->core.tid,
-                                pa5_position(b->core.pos, bam_endpos(b.get())),
+                                static_cast<uint32_t>(b->core.pos),
+                                static_cast<uint32_t>(bam_endpos(b.get())),
                                 b->core.qual});
     }
     if (ret < -1) throw std::runtime_error("Truncated or corrupt input: " + input_path);
 
-    flush_group(group, hdr.get(), out, result);
+    flush_group(group, hdr.get(), out, config.format, result);
     out.close();
     return result;
 }
