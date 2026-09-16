@@ -82,8 +82,6 @@ inline uint32_t pa5_position(int64_t pos0, int64_t end0) {
  *
  * Memory is bounded by the segments of the read currently streaming past;
  * the quadratic expansion happens once per read, at the group boundary.
- * The output takes its final name only once it is complete; a run that
- * fails leaves no partial file behind.
  */
 ContactsResult reconstruct_contacts(
     const std::string& input_path,

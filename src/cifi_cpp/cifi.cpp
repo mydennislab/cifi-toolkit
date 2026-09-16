@@ -728,8 +728,7 @@ NB_MODULE(_core, m) {
           "contacts per read, for YaHS (.gz for gzip). format 'pa5' writes one\n"
           "row per contact with the alignment midpoints; 'bed' writes two\n"
           "consecutive rows per contact with each segment's aligned span.\n"
-          "Primary mapped records at or above mapq take part; C(k,2) contacts per read.\n"
-          "The output appears under its name only once complete.");
+          "Primary mapped records at or above mapq take part; C(k,2) contacts per read.");
 
     m.def("pa5_position", &cifi::pa5_position,
           nb::arg("pos0"), nb::arg("end0"),

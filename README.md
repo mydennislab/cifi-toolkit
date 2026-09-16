@@ -123,17 +123,6 @@ or Bioconda:
 mamba install bioconda::cifi
 ```
 
-## Development branch
-
-To install the development branch containing native unique-segment contact reconstruction:
-
-```bash
-git clone https://github.com/mydennislab/cifi-toolkit.git
-cd cifi-toolkit
-git checkout cifi-native-contacts
-pip install .
-```
-
 Check the installation:
 
 ```bash
@@ -226,7 +215,7 @@ minimap2 -t 32 \
 
 `samtools sort -n` is required because `cifi contacts` processes all segments belonging to the same original CiFi read together.
 
-`--secondary=no` gives each retained segment one primary placement for contact reconstruction.
+`--secondary=no` suppresses secondary alignments so the standard contact-reconstruction path retains a single primary placement for each mapped segment.
 
 `--no-hash-name` prevents query-name-dependent tie breaking for equally scoring mappings.
 
