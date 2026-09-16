@@ -1,5 +1,7 @@
 #include "digestion.hpp"
+#include "segment_name.hpp"
 #include <algorithm>
+#include <stdexcept>
 
 namespace cifi {
 
@@ -41,6 +43,7 @@ SegmentExtraction extract_segments(
         }
         if (static_cast<int>(end - start) >= min_emit_len) {
             out.segments.push_back({start, end});
+            out.span_index.push_back(static_cast<uint32_t>(i + 1));
         } else {
             out.dropped_short++;
             out.bases_dropped += end - start;
@@ -57,7 +60,8 @@ bool process_single_read(
     const ProcessingConfig& config,
     FastqWriter& out_r1,
     FastqWriter& out_r2,
-    ProcessingResult& result
+    ProcessingResult& result,
+    FastqWriter* out_segments
 ) {
     // Input profile: recorded for every read, including ones skipped below,
     // so the report describes what was fed in rather than what survived.
@@ -115,6 +119,28 @@ bool process_single_read(
     result.segments_per_read_stats.add(static_cast<int>(segments.size()));
     result.pairs_per_read_stats.add(
         static_cast<int>(segments.size() * (segments.size() - 1) / 2));
+
+    // Each retained segment once, as it lies in the read: this is what gets
+    // mapped when contacts are reconstructed after alignment, so the R2
+    // reverse complement (a paired-FASTQ concern) does not apply here.
+    if (out_segments) {
+        // The parser finds the marker from the right, so a name that already
+        // carries it would still split, but its segments could no longer be
+        // told apart from those of a read named after them.
+        if (name.find(SEGMENT_NAME_SEP) != std::string::npos) {
+            throw std::runtime_error("read name already contains " +
+                                     std::string(SEGMENT_NAME_SEP) + ": " + name);
+        }
+        for (size_t i = 0; i < segments.size(); i++) {
+            const auto& [start, end] = segments[i];
+            out_segments->write(segment_name(name, extraction.span_index[i]),
+                                sequence.substr(start, end - start),
+                                quality.substr(start, end - start));
+            result.bases_out_segments += end - start;
+        }
+        result.segments_written += segments.size();
+    }
+
     // Generate ALL pairs (n choose 2)
     for (size_t i = 0; i < segments.size(); i++) {
         for (size_t j = i + 1; j < segments.size(); j++) {
@@ -139,7 +165,9 @@ bool process_single_read(
 
             // Both mates carry one name: R1/R2 FASTQ has no flags, so the name
             // is the only thing that identifies a pair. A "/1" or "/2" suffix
-            // would make the two files disagree on every pair.
+            // would make the two files disagree on every pair. These indices
+            // count kept segments (unlike the span indices in the unique
+            // segment names) and are kept as they were for compatibility.
             std::string pair_name = name + "_" + std::to_string(i) + "_" + std::to_string(j - i - 1);
 
             out_r1.write(pair_name, seq1, qual1);
